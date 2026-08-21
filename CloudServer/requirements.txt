@@ -1,0 +1,9 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic==2.11.7
+transformers==4.55.2
+accelerate==1.10.0
+huggingface-hub==0.34.4
+sentencepiece==0.2.1
+safetensors==0.6.2
+
