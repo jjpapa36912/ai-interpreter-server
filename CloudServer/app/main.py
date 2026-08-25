@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from .settings import settings
 from .translation import CUDATranslator
-from .asr import CUDASpeechRecognizer, StreamingASRSession
+from .asr import CUDASpeechRecognizer, StreamCommitLedger, StreamingASRSession
 
 
 app = FastAPI(title="AI Interpreter CUDA Server", version="0.1.0")
@@ -51,6 +51,7 @@ def _preload_models() -> None:
     try:
         speech_recognizer().load()
         translator().load()
+        translator().warmup()
         _preload_complete = True
     except Exception as error:  # surfaced verbatim by /ready for deployment diagnosis
         _preload_error = f"{type(error).__name__}: {error}"
@@ -97,6 +98,7 @@ def ready() -> dict[str, object]:
         "cuda": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "translation_model": settings.translation_model,
+        "translation_adapter": settings.translation_adapter or None,
         "translation_loaded": translator().loaded,
         "asr_model": settings.asr_model,
         "asr_loaded": speech_recognizer().loaded,
@@ -164,6 +166,7 @@ async def stream_asr(websocket: WebSocket) -> None:
         await websocket.close(code=4400, reason="PCM16 16kHz mono en/ko required")
         return
     session = StreamingASRSession(sample_rate=sample_rate)
+    ledger = StreamCommitLedger()
 
     async def decode(final: bool) -> None:
         if not session.pcm:
@@ -172,7 +175,7 @@ async def stream_asr(websocket: WebSocket) -> None:
             speech_recognizer().transcribe_pcm16, bytes(session.pcm), language
         )
         session.mark_decoded()
-        decision = session.committer.update(text, final=final)
+        decision = ledger.apply(session.committer.update(text, final=final))
         await websocket.send_json({
             "type": "asr",
             **decision,
@@ -193,6 +196,7 @@ async def stream_asr(websocket: WebSocket) -> None:
                     await decode(final=False)
                 if session.audio_seconds >= session.maximum_audio_seconds:
                     await decode(final=True)
+                    ledger.begin_new_buffer()
                     session = StreamingASRSession(sample_rate=sample_rate)
             elif command == "finish":
                 await decode(final=True)

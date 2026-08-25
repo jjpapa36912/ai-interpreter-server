@@ -22,27 +22,99 @@ def _common_prefix_length(left: list[str], right: list[str]) -> int:
     return length
 
 
+def _normalized(word: str) -> str:
+    return word.casefold().strip(".,!?;:\"")
+
+
+def _uncommitted_tail(committed: list[str], current: list[str]) -> list[str] | None:
+    """Align a revised cumulative hypothesis after already-spoken words.
+
+    Whisper can remove fillers or rewrite an early phrase. In that case a raw
+    word index repeats or skips text. Align the longest committed suffix found
+    in the new hypothesis and only consider words after it.
+    """
+    if not committed:
+        return current
+    normalized_current = [_normalized(word) for word in current]
+    normalized_committed = [_normalized(word) for word in committed]
+    for overlap in range(min(len(committed), len(current)), 0, -1):
+        suffix = normalized_committed[-overlap:]
+        for start in range(0, len(current) - overlap + 1):
+            if normalized_current[start:start + overlap] == suffix:
+                return current[start + overlap:]
+    return None
+
+
 @dataclass
 class StableASRCommitter:
     """Commit only words preserved by two consecutive cumulative decodes."""
 
     lookahead_words: int = 2
-    previous: list[str] = field(default_factory=list)
-    committed_count: int = 0
+    agreement_decodes: int = 3
+    uncommitted_history: list[list[str]] = field(default_factory=list)
+    committed: list[str] = field(default_factory=list)
 
     def update(self, text: str, final: bool = False) -> dict[str, object]:
         current = _words(text)
-        stable_count = len(current) if final else _common_prefix_length(self.previous, current)
-        commit_count = len(current) if final else max(0, stable_count - self.lookahead_words)
-        commit_count = max(self.committed_count, commit_count)
-        delta = current[self.committed_count:commit_count]
-        self.committed_count = commit_count
-        self.previous = current
+        tail = _uncommitted_tail(self.committed, current)
+        if tail is None:
+            self.uncommitted_history = []
+            delta: list[str] = []
+        else:
+            if final:
+                stable_count = len(tail)
+            elif len(self.uncommitted_history) < self.agreement_decodes - 1:
+                stable_count = 0
+            else:
+                stable_count = len(tail)
+                for prior in self.uncommitted_history:
+                    stable_count = min(
+                        stable_count, _common_prefix_length(prior, tail)
+                    )
+            # Always allow one stable leading word for sub-1.5 s startup, but
+            # retain two lookahead words once the hypothesis becomes longer.
+            hold = min(self.lookahead_words, max(0, stable_count - 1))
+            commit_count = len(tail) if final else max(0, stable_count - hold)
+            delta = tail[:commit_count]
+            self.committed.extend(delta)
+            history = [prior[commit_count:] for prior in self.uncommitted_history]
+            history.append(tail[commit_count:])
+            self.uncommitted_history = history[-(self.agreement_decodes - 1):]
         return {
             "hypothesis": " ".join(current),
             "committed_delta": " ".join(delta),
-            "committed_words": self.committed_count,
+            "committed_words": len(self.committed),
             "is_final": final,
+        }
+
+
+@dataclass
+class StreamCommitLedger:
+    """Keep monotonic counts and remove duplicated words at buffer seams."""
+
+    committed: list[str] = field(default_factory=list)
+    seam_pending: bool = False
+
+    def begin_new_buffer(self) -> None:
+        self.seam_pending = True
+
+    def apply(self, decision: dict[str, object]) -> dict[str, object]:
+        delta = _words(str(decision.get("committed_delta", "")))
+        if delta and self.seam_pending:
+            previous = [_normalized(word) for word in self.committed[-8:]]
+            incoming = [_normalized(word) for word in delta]
+            overlap = 0
+            for size in range(min(len(previous), len(incoming)), 0, -1):
+                if previous[-size:] == incoming[:size]:
+                    overlap = size
+                    break
+            delta = delta[overlap:]
+            self.seam_pending = False
+        self.committed.extend(delta)
+        return {
+            **decision,
+            "committed_delta": " ".join(delta),
+            "committed_words": len(self.committed),
         }
 
 
@@ -83,7 +155,7 @@ class CUDASpeechRecognizer:
             segments, _ = self._model.transcribe(
                 audio,
                 language=language,
-                beam_size=1,
+                beam_size=self.settings.asr_beam_size,
                 best_of=1,
                 temperature=0,
                 condition_on_previous_text=False,
@@ -97,8 +169,8 @@ class CUDASpeechRecognizer:
 @dataclass
 class StreamingASRSession:
     sample_rate: int = 16_000
-    minimum_decode_seconds: float = 0.8
-    decode_interval_seconds: float = 0.6
+    minimum_decode_seconds: float = 0.6
+    decode_interval_seconds: float = 0.3
     maximum_audio_seconds: float = 20.0
     pcm: bytearray = field(default_factory=bytearray)
     last_decode_bytes: int = 0
@@ -118,4 +190,3 @@ class StreamingASRSession:
     @property
     def audio_seconds(self) -> float:
         return len(self.pcm) / (self.sample_rate * 2)
-
