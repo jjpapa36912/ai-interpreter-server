@@ -370,14 +370,24 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             let synthesisStarted = ContinuousClock.now
             let groupID = UUID()
             let continuation = outputContinuation
-            try await neuralTTS.synthesize(
-                text: response.text,
-                language: targetLanguage
-            ) { chunk in
-                switch continuation.yield(chunk.groupedForPlayback(groupID)) {
-                case .enqueued, .dropped, .terminated: break
-                @unknown default: break
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { [neuralTTS] in
+                    try await neuralTTS.synthesize(
+                        text: response.text,
+                        language: targetLanguage
+                    ) { chunk in
+                        switch continuation.yield(chunk.groupedForPlayback(groupID)) {
+                        case .enqueued, .dropped, .terminated: break
+                        @unknown default: break
+                        }
+                    }
                 }
+                group.addTask {
+                    try await Task.sleep(for: TTSQueuePolicy.synthesisWatchdogTimeout)
+                    throw URLError(.timedOut)
+                }
+                try await group.next()
+                group.cancelAll()
             }
             metrics.synthesisMilliseconds = synthesisStarted.duration(to: .now).milliseconds
             metrics.outputChunks += 1
