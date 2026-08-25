@@ -9,3 +9,4 @@ safetensors==0.6.2
 faster-whisper==1.2.0
 numpy==2.1.2
 peft==0.17.1
+nvidia-cublas-cu12>=12.8,<13

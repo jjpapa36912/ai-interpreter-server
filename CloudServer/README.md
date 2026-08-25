@@ -1,7 +1,8 @@
 # AI Interpreter CUDA Server
 
-This is the NVIDIA/CUDA boundary for the macOS interpreter. The first deployable
-slice keeps resident Whisper and Qwen3 models on the GPU and exposes authenticated
+This is the NVIDIA/CUDA boundary for interpreter clients. The production
+prototype keeps resident faster-whisper Turbo and MADLAD-400 3B + EN/KO v3
+adapter models on the GPU and exposes authenticated
 health, readiness, streaming ASR, translation, and context-reset endpoints.
 
 ## gcube settings
@@ -32,6 +33,19 @@ curl -X POST "$SERVICE_URL/v1/translate" \
 until `/ready` returns `{"status":"ready"}`. This guarantees that the first utterance
 does not pay model-download or model-load latency. Keep one replica resident during
 a test session and stop the workload immediately afterward.
+
+The image contains the public base-model snapshots and reconstructs the trained
+adapter from repository-safe chunks during the GitHub Actions build. A G-Cube
+deployment must not require `ssh-copy-id`, SCP, manual Dropbear restarts, or
+runtime model downloads. If `/ready` reports any other model names, the old
+image is running and the app test must not begin.
+
+Validate a new deployment before opening the app:
+
+```bash
+AI_INTERPRETER_SERVER_TOKEN="$TOKEN" python CloudServer/tools/validate_deployment.py \
+  --url "$SERVICE_URL"
+```
 
 ## Streaming ASR protocol
 
