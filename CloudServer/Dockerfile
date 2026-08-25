@@ -17,9 +17,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/ai-interpreter
 COPY CloudServer/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
-# Preserve the CUDA-matched torch/torchaudio pair supplied by the NGC base.
-# qwen-tts declares a newer generic torch dependency which otherwise replaces
-# only torch and leaves torchaudio with an incompatible binary ABI.
+# NGC 25.08 ships a PyTorch 2.8 development snapshot. Pairing that snapshot
+# with a released torchaudio wheel causes an undefined-symbol ABI failure.
+# Install the official CUDA 12.8 PyTorch/torchaudio 2.8.0 pair together; the
+# RTX 5090 driver is backward-compatible with this CUDA runtime.
+RUN PIP_CONSTRAINT= python -m pip install --no-cache-dir --force-reinstall \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      torch==2.8.0 torchaudio==2.8.0
+# Avoid qwen-tts pulling another generic torch build over the verified pair.
 RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1 && \
     python -c "import torch, torchaudio; from qwen_tts import Qwen3TTSModel; print(torch.__version__, torchaudio.__version__)"
 
