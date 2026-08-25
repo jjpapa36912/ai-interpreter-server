@@ -16,6 +16,11 @@ class Settings:
     asr_model: str = os.getenv("AI_INTERPRETER_ASR_MODEL", "turbo")
     asr_compute_type: str = os.getenv("AI_INTERPRETER_ASR_COMPUTE_TYPE", "float16")
     asr_beam_size: int = int(os.getenv("AI_INTERPRETER_ASR_BEAM_SIZE", "1"))
+    tts_model: str = os.getenv(
+        "AI_INTERPRETER_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    )
+    tts_korean_voice: str = os.getenv("AI_INTERPRETER_TTS_KOREAN_VOICE", "Sohee")
+    tts_english_voice: str = os.getenv("AI_INTERPRETER_TTS_ENGLISH_VOICE", "Ryan")
 
 
 settings = Settings()

@@ -7,11 +7,13 @@ import threading
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .settings import settings
 from .translation import CUDATranslator
 from .asr import CUDASpeechRecognizer, StreamCommitLedger, StreamingASRSession
+from .tts import CUDANeuralTTS
 
 
 app = FastAPI(title="AI Interpreter CUDA Server", version="0.1.0")
@@ -35,6 +37,12 @@ class TranslationResponse(BaseModel):
     latency_ms: float
 
 
+class TTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+    language: str
+    voice_id: str | None = None
+
+
 @lru_cache(maxsize=1)
 def translator() -> CUDATranslator:
     return CUDATranslator(settings)
@@ -45,6 +53,11 @@ def speech_recognizer() -> CUDASpeechRecognizer:
     return CUDASpeechRecognizer(settings)
 
 
+@lru_cache(maxsize=1)
+def neural_tts() -> CUDANeuralTTS:
+    return CUDANeuralTTS(settings)
+
+
 def _preload_models() -> None:
     """Load ASR first, then translation, without blocking the health endpoint."""
     global _preload_complete, _preload_error
@@ -53,6 +66,8 @@ def _preload_models() -> None:
         speech_recognizer().warmup()
         translator().load()
         translator().warmup()
+        neural_tts().load()
+        neural_tts().warmup()
         _preload_complete = True
     except Exception as error:  # surfaced verbatim by /ready for deployment diagnosis
         _preload_error = f"{type(error).__name__}: {error}"
@@ -103,8 +118,32 @@ def ready() -> dict[str, object]:
         "translation_loaded": translator().loaded,
         "asr_model": settings.asr_model,
         "asr_loaded": speech_recognizer().loaded,
+        "tts_model": settings.tts_model,
+        "tts_loaded": neural_tts().loaded,
         "preload_error": _preload_error,
     }
+
+
+@app.post("/v1/tts/stream", dependencies=[Depends(authorize)])
+def synthesize_speech(request: TTSRequest) -> StreamingResponse:
+    try:
+        pcm, sample_rate = neural_tts().synthesize(
+            request.text, request.language, request.voice_id
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    chunk_bytes = max(2, int(sample_rate * 0.08) * 2)
+
+    def chunks():
+        for offset in range(0, len(pcm), chunk_bytes):
+            yield pcm[offset:offset + chunk_bytes]
+
+    return StreamingResponse(
+        chunks(),
+        media_type=f"audio/L16;rate={sample_rate};channels=1",
+        headers={"X-Audio-Sample-Rate": str(sample_rate)},
+    )
 
 
 @app.post(

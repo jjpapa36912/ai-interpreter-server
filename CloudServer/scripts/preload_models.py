@@ -23,6 +23,12 @@ def main() -> None:
         os.environ.get("AI_INTERPRETER_ASR_MODEL", "turbo"),
         cache_dir=str(cache),
     )
+    snapshot_download(
+        repo_id=os.environ.get(
+            "AI_INTERPRETER_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+        ),
+        cache_dir=str(cache),
+    )
     print(f"preloaded public models in {cache}")
 
 

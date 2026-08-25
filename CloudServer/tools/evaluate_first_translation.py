@@ -57,7 +57,8 @@ async def evaluate(ws_url: str, translate_url: str, audio: Path, source: str) ->
     translation_payload = None
     source_chunk = None
     target = "ko" if source == "en" else "en"
-    endpoint = f"{ws_url}?language={source}&sample_rate=16000"
+    separator = "&" if "?" in ws_url else "?"
+    endpoint = f"{ws_url}{separator}language={source}&sample_rate=16000"
     async with websockets.connect(endpoint, max_size=2**22) as socket:
         async def receive() -> None:
             nonlocal first_commit, translated, translation_payload, source_chunk
@@ -67,9 +68,15 @@ async def evaluate(ws_url: str, translate_url: str, audio: Path, source: str) ->
                 if delta and first_commit is None:
                     first_commit = time.perf_counter() - started
                     source_chunk = delta
-                    translation_payload = await asyncio.to_thread(
-                        translate, translate_url, delta, source, target
-                    )
+                    if message.get("translation"):
+                        translation_payload = {
+                            "translation": message["translation"],
+                            "latency_ms": message.get("translation_latency_ms"),
+                        }
+                    else:
+                        translation_payload = await asyncio.to_thread(
+                            translate, translate_url, delta, source, target
+                        )
                     translated = time.perf_counter() - started
                 if message.get("type") == "finished":
                     break

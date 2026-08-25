@@ -63,8 +63,8 @@ struct CUDAStreamingServerConfiguration: Sendable, Equatable {
 }
 
 /// Cross-platform service boundary for live ASR and translation. The only
-/// platform-specific component left in this macOS client is final speech
-/// rendering; capture, ASR, commit ordering and translation live on the GPU.
+/// ASR, translation and neural speech synthesis all run behind the same GPU
+/// service boundary, so this path has no Apple speech/translation dependency.
 actor CUDAStreamingTranslationProvider: TranslationProvider {
     private struct QueuedSource: Sendable {
         let text: String
@@ -105,6 +105,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private let configuration: CUDAStreamingServerConfiguration
     private let session: URLSession
     private let translationClient: CUDATranslationClient
+    private let neuralTTS: CosyVoiceStreamingClient
     private let outputContinuation: AsyncStream<AudioChunk>.Continuation
     private var sourceLanguage: Language?
     private var targetLanguage: Language?
@@ -113,6 +114,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private var translationTask: Task<Void, Never>?
     private var translationContinuation: AsyncStream<QueuedSource>.Continuation?
     private var pipeline = AudioChunkPipeline()
+    private var silenceGate = StreamingSilenceGate()
     private var pipelineTask: Task<Void, Never>?
     private var metrics = AudioPipelineMetrics()
     private var sessionStartedAt: ContinuousClock.Instant?
@@ -127,6 +129,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         translationClient = CUDATranslationClient(
             endpoint: configuration.endpoint,
             authorization: configuration.authorization
+        )
+        neuralTTS = CosyVoiceStreamingClient.configured(
+            from: configuration,
+            session: session
         )
         let output = AsyncStream<AudioChunk>.makeStream(
             bufferingPolicy: .bufferingNewest(AppConfiguration.maximumTranslatedAudioChunks)
@@ -155,6 +161,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         metrics = AudioPipelineMetrics()
         pendingError = nil
         pipeline = AudioChunkPipeline()
+        silenceGate.reset()
 
         let request = URLRequest(url: try configuration.webSocketURL(sourceLanguage: sourceLanguage))
         let webSocket = session.webSocketTask(with: request)
@@ -192,6 +199,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             throw pendingError
         }
         metrics.inputChunks += 1
+        // Do not send startup/digital silence to Whisper. Decoding an all-zero
+        // prefix can hallucinate short polite phrases (for example "감사해요")
+        // which would otherwise be committed and spoken before media starts.
+        guard silenceGate.shouldForward(chunk) else { return }
         await pipeline.ingest(chunk)
     }
 
@@ -357,42 +368,19 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 return
             }
             let synthesisStarted = ContinuousClock.now
-            let chunks = try await withThrowingTaskGroup(of: [AudioChunk].self) { group in
-                group.addTask {
-                    try await AppleLocalTranslationProvider.synthesizeText(
-                        response.text, language: targetLanguage
-                    )
+            let groupID = UUID()
+            let continuation = outputContinuation
+            try await neuralTTS.synthesize(
+                text: response.text,
+                language: targetLanguage
+            ) { chunk in
+                switch continuation.yield(chunk.groupedForPlayback(groupID)) {
+                case .enqueued, .dropped, .terminated: break
+                @unknown default: break
                 }
-                group.addTask {
-                    try await Task.sleep(for: TTSQueuePolicy.synthesisWatchdogTimeout)
-                    throw URLError(.timedOut)
-                }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
             }
             metrics.synthesisMilliseconds = synthesisStarted.duration(to: .now).milliseconds
-            guard !TTSQueuePolicy.isStale(
-                .simultaneousCommitted,
-                text: response.text,
-                enqueuedAt: request.enqueuedAt
-            ) else {
-                metrics.droppedChunks += 1
-                return
-            }
-            let groupID = UUID()
-            for chunk in chunks {
-                guard !Task.isCancelled else { return }
-                switch outputContinuation.yield(chunk.groupedForPlayback(groupID)) {
-                case .enqueued: metrics.outputChunks += 1
-                case .dropped:
-                    metrics.outputChunks += 1
-                    metrics.droppedChunks += 1
-                    return
-                case .terminated: return
-                @unknown default: return
-                }
-            }
+            metrics.outputChunks += 1
         } catch is CancellationError {
             return
         } catch {
