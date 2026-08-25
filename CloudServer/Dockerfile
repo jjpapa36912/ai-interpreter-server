@@ -16,12 +16,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/ai-interpreter
 COPY CloudServer/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
-COPY CloudServer/app ./app
-COPY CloudServer/tools ./tools
-COPY CloudServer/scripts ./scripts
 
-# Download public base weights before copying the frequently updated adapter,
-# allowing GHCR's previous image to reuse this large immutable layer.
+# Keep model layers independent of frequently changed application code. Future
+# server-only fixes then reuse the multi-GB weights instead of downloading them.
+COPY CloudServer/scripts/preload_models.py ./scripts/preload_models.py
 RUN python ./scripts/preload_models.py
 
 COPY CloudServer/models/madlad400-3b-en-ko-v3-adapter \
@@ -35,6 +33,10 @@ RUN mkdir -p /models/madlad400-3b-en-ko-v3-adapter && \
     echo "78c04013a677e63ed4ecd6c3563148f337f820235820a37bb444f3752b00b20f  /models/madlad400-3b-en-ko-v3-adapter/adapter_model.safetensors" \
        | sha256sum -c - && \
     rm -rf /tmp/madlad400-3b-en-ko-v3-adapter
+
+COPY CloudServer/app ./app
+COPY CloudServer/tools ./tools
+COPY CloudServer/scripts ./scripts
 
 RUN chmod +x ./scripts/start-server.sh
 
