@@ -50,6 +50,7 @@ def _preload_models() -> None:
     global _preload_complete, _preload_error
     try:
         speech_recognizer().load()
+        speech_recognizer().warmup()
         translator().load()
         translator().warmup()
         _preload_complete = True
@@ -167,6 +168,8 @@ async def stream_asr(websocket: WebSocket) -> None:
         return
     session = StreamingASRSession(sample_rate=sample_rate)
     ledger = StreamCommitLedger()
+    translation_session_id = f"ws-{id(websocket)}"
+    target_language = "ko" if language == "en" else "en"
 
     async def decode(final: bool) -> None:
         if not session.pcm:
@@ -176,9 +179,26 @@ async def stream_asr(websocket: WebSocket) -> None:
         )
         session.mark_decoded()
         decision = ledger.apply(session.committer.update(text, final=final))
+        committed_delta = str(decision.get("committed_delta", "")).strip()
+        translation = None
+        translation_latency_ms = None
+        if committed_delta:
+            translation_started = time.perf_counter()
+            translation = await asyncio.to_thread(
+                translator().translate,
+                committed_delta,
+                language,
+                target_language,
+                translation_session_id,
+            )
+            translation_latency_ms = round(
+                (time.perf_counter() - translation_started) * 1000, 1
+            )
         await websocket.send_json({
             "type": "asr",
             **decision,
+            "translation": translation,
+            "translation_latency_ms": translation_latency_ms,
             "audio_seconds": round(session.audio_seconds, 3),
             "latency_ms": round(latency_ms, 1),
             "model": settings.asr_model,
@@ -209,3 +229,5 @@ async def stream_asr(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "error", "error": "unknown message"})
     except WebSocketDisconnect:
         pass
+    finally:
+        translator().reset(translation_session_id)

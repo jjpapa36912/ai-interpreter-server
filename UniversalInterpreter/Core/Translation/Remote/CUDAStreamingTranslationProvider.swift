@@ -44,10 +44,17 @@ struct CUDAStreamingServerConfiguration: Sendable, Equatable {
             resolvingAgainstBaseURL: false
         )
         components?.scheme = endpoint.scheme == "https" ? "wss" : "ws"
-        components?.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "language", value: sourceLanguage.rawValue),
             URLQueryItem(name: "sample_rate", value: "16000"),
         ]
+        // Some managed WebSocket proxies don't forward an Authorization header
+        // from URLSession's upgrade request. The server accepts the same bearer
+        // credential as an encrypted WSS query parameter for this handshake.
+        if let authorization, !authorization.isEmpty {
+            queryItems.append(URLQueryItem(name: "token", value: authorization))
+        }
+        components?.queryItems = queryItems
         guard let url = components?.url else {
             throw CUDAStreamingProviderError.invalidEndpoint
         }
@@ -61,6 +68,8 @@ struct CUDAStreamingServerConfiguration: Sendable, Equatable {
 actor CUDAStreamingTranslationProvider: TranslationProvider {
     private struct QueuedSource: Sendable {
         let text: String
+        let translation: String?
+        let translationMilliseconds: Double?
         let enqueuedAt: ContinuousClock.Instant
     }
 
@@ -79,11 +88,15 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         let hypothesis: String?
         let committedDelta: String?
         let latencyMilliseconds: Double?
+        let translation: String?
+        let translationMilliseconds: Double?
 
         enum CodingKeys: String, CodingKey {
             case type, hypothesis
             case committedDelta = "committed_delta"
             case latencyMilliseconds = "latency_ms"
+            case translation
+            case translationMilliseconds = "translation_latency_ms"
         }
     }
 
@@ -133,7 +146,9 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
 
     func startSession(sourceLanguage: Language, targetLanguage: Language) async throws {
         guard socket == nil else { return }
-        try await requireReady()
+        // Connect directly. G-Cube's HTTP proxy can intermittently return 503
+        // for /ready while the WebSocket route is healthy. The WebSocket endpoint
+        // already closes with 1013/1011 when models aren't actually available.
         self.sourceLanguage = sourceLanguage
         self.targetLanguage = targetLanguage
         sessionStartedAt = .now
@@ -141,10 +156,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         pendingError = nil
         pipeline = AudioChunkPipeline()
 
-        var request = URLRequest(url: try configuration.webSocketURL(sourceLanguage: sourceLanguage))
-        if let authorization = configuration.authorization {
-            request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
-        }
+        let request = URLRequest(url: try configuration.webSocketURL(sourceLanguage: sourceLanguage))
         let webSocket = session.webSocketTask(with: request)
         socket = webSocket
         webSocket.resume()
@@ -212,21 +224,34 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     }
 
     private func requireReady() async throws {
-        var request = URLRequest(url: configuration.endpoint.appending(path: "ready"))
-        request.timeoutInterval = 15
-        if let authorization = configuration.authorization {
-            request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+        var lastDetail = "invalid response"
+        for attempt in 0..<4 {
+            do {
+                var request = URLRequest(url: configuration.endpoint.appending(path: "ready"))
+                request.timeoutInterval = 15
+                if let authorization = configuration.authorization {
+                    request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+                }
+                let (data, response) = try await session.data(for: request)
+                let status = (response as? HTTPURLResponse)?.statusCode
+                if status.map({ (200..<300).contains($0) }) == true,
+                   let ready = try? JSONDecoder().decode(ReadyResponse.self, from: data),
+                   ready.status == "ready" {
+                    return
+                }
+                lastDetail = "HTTP \(status ?? -1): " +
+                    (String(data: data, encoding: .utf8) ?? "invalid response")
+                guard status == 502 || status == 503 || status == 504 else { break }
+            } catch {
+                lastDetail = error.localizedDescription
+                guard (error as? URLError)?.code == .badServerResponse ||
+                        (error as? URLError)?.code == .networkConnectionLost else { break }
+            }
+            if attempt < 3 {
+                try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+            }
         }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode),
-              let ready = try? JSONDecoder().decode(ReadyResponse.self, from: data),
-              ready.status == "ready"
-        else {
-            throw CUDAStreamingProviderError.serverNotReady(
-                String(data: data, encoding: .utf8) ?? "invalid response"
-            )
-        }
+        throw CUDAStreamingProviderError.serverNotReady(lastDetail)
     }
 
     private func sendPCM(_ data: Data) async throws {
@@ -265,7 +290,12 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                        let sessionStartedAt {
                         metrics.firstStableCommitMilliseconds = sessionStartedAt.duration(to: .now).milliseconds
                     }
-                    translationContinuation?.yield(QueuedSource(text: delta, enqueuedAt: .now))
+                    translationContinuation?.yield(QueuedSource(
+                        text: delta,
+                        translation: decoded.translation,
+                        translationMilliseconds: decoded.translationMilliseconds,
+                        enqueuedAt: .now
+                    ))
                 }
                 if decoded.type == "finished" { break }
             }
@@ -287,23 +317,30 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             return
         }
         do {
-            let response = try await withThrowingTaskGroup(
-                of: (text: String, milliseconds: Double).self
-            ) { group in
-                group.addTask { [translationClient] in
-                    try await translationClient.translate(
-                        text: request.text,
-                        sourceLanguage: sourceLanguage,
-                        targetLanguage: targetLanguage
-                    )
+            let response: (text: String, milliseconds: Double)
+            if let translation = request.translation?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !translation.isEmpty {
+                response = (translation, request.translationMilliseconds ?? 0)
+            } else {
+                response = try await withThrowingTaskGroup(
+                    of: (text: String, milliseconds: Double).self
+                ) { group in
+                    group.addTask { [translationClient] in
+                        try await translationClient.translate(
+                            text: request.text,
+                            sourceLanguage: sourceLanguage,
+                            targetLanguage: targetLanguage
+                        )
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: TranslationQueuePolicy.remoteWatchdogTimeout)
+                        throw URLError(.timedOut)
+                    }
+                    let result = try await group.next()!
+                    group.cancelAll()
+                    return result
                 }
-                group.addTask {
-                    try await Task.sleep(for: TranslationQueuePolicy.remoteWatchdogTimeout)
-                    throw URLError(.timedOut)
-                }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
             }
             metrics.translationMilliseconds = response.milliseconds
             metrics.translationPhrase = response.text

@@ -165,6 +165,12 @@ class CUDASpeechRecognizer:
             text = " ".join(segment.text.strip() for segment in segments).strip()
         return text, (time.perf_counter() - started) * 1000
 
+    def warmup(self) -> None:
+        """Run real CUDA inference so the first user utterance isn't the warmup."""
+        silence = np.zeros(16_000, dtype="<i2").tobytes()
+        self.transcribe_pcm16(silence, "en")
+        self.transcribe_pcm16(silence, "ko")
+
 
 @dataclass
 class StreamingASRSession:

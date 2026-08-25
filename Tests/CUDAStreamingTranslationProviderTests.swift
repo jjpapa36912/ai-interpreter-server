@@ -30,5 +30,6 @@ struct CUDAStreamingTranslationProviderTests {
         #expect(url.path == "/base/v1/asr/stream")
         #expect(url.query?.contains("language=ko") == true)
         #expect(url.query?.contains("sample_rate=16000") == true)
+        #expect(url.query?.contains("token=secret") == true)
     }
 }

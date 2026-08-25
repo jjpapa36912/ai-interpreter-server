@@ -34,7 +34,8 @@ final class AppState {
     var localModelWarmupState: ComponentState = .idle
     var listeningEnabled = true
     var speakingEnabled = false
-    var translationEngineMode: TranslationEngineMode = .expressiveLocal
+    var translationEngineMode: TranslationEngineMode =
+        CUDAStreamingTranslationProvider.configured() == nil ? .expressiveLocal : .gpuStreaming
     var localVocabularyText = UserDefaults.standard.string(forKey: "localVocabulary") ?? "" {
         didSet { UserDefaults.standard.set(localVocabularyText, forKey: "localVocabulary") }
     }
