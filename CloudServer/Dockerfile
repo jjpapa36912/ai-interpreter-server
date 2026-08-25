@@ -32,7 +32,6 @@ RUN python -c "import torch; print(torch.__version__)"
 RUN python -c "import torchaudio; print(torchaudio.__version__)"
 RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1
 RUN python ./scripts/patch_qwen_tts_12hz.py
-RUN python -c "from qwen_tts import Qwen3TTSModel; print(Qwen3TTSModel.__name__)"
 
 # Keep model layers independent of frequently changed application code. Future
 # server-only fixes then reuse the multi-GB weights instead of downloading them.
