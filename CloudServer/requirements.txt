@@ -6,4 +6,5 @@ accelerate==1.10.0
 huggingface-hub==0.34.4
 sentencepiece==0.2.1
 safetensors==0.6.2
-
+faster-whisper==1.2.0
+numpy==2.1.2

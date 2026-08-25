@@ -12,7 +12,8 @@ class Settings:
     api_token: str = os.getenv("AI_INTERPRETER_SERVER_TOKEN", "")
     max_new_tokens: int = int(os.getenv("AI_INTERPRETER_MAX_NEW_TOKENS", "128"))
     model_max_memory: str = os.getenv("AI_INTERPRETER_MODEL_MAX_MEMORY", "18GiB")
+    asr_model: str = os.getenv("AI_INTERPRETER_ASR_MODEL", "turbo")
+    asr_compute_type: str = os.getenv("AI_INTERPRETER_ASR_COMPUTE_TYPE", "float16")
 
 
 settings = Settings()
-

@@ -1,9 +1,8 @@
 # AI Interpreter CUDA Server
 
 This is the NVIDIA/CUDA boundary for the macOS interpreter. The first deployable
-slice keeps a resident Qwen3 translator on the GPU and exposes authenticated
-health, readiness, translation, and context-reset endpoints. Streaming ASR and
-TTS are added behind the same API in the next slices.
+slice keeps resident Whisper and Qwen3 models on the GPU and exposes authenticated
+health, readiness, streaming ASR, translation, and context-reset endpoints.
 
 ## gcube settings
 
@@ -29,7 +28,16 @@ curl -X POST "$SERVICE_URL/v1/translate" \
   -d '{"text":"The launch is not out of the woods yet.","source_language":"en","target_language":"ko","session_id":"smoke"}'
 ```
 
-The first translation downloads and loads the model, so it is intentionally a
-cold-start request. Keep one replica resident during a test session and stop the
-workload immediately afterward.
+`/health` becomes available while models are loading. Do not start a live session
+until `/ready` returns `{"status":"ready"}`. This guarantees that the first utterance
+does not pay model-download or model-load latency. Keep one replica resident during
+a test session and stop the workload immediately afterward.
 
+## Streaming ASR protocol
+
+Connect to `wss://SERVICE/v1/asr/stream?language=en&sample_rate=16000` with the
+same bearer token, then send mono 16 kHz signed little-endian PCM16 as binary
+frames. Server messages contain a provisional `hypothesis` and a monotonic
+`committed_delta`; consumers must translate/speak only `committed_delta`. Send
+the text message `finish` at end of stream. A close code of `1013` means the
+resident ASR model is not ready yet.
