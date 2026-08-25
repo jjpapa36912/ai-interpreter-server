@@ -25,8 +25,12 @@ RUN PIP_CONSTRAINT= python -m pip install --no-cache-dir --force-reinstall \
       --index-url https://download.pytorch.org/whl/cu128 \
       torch==2.8.0 torchaudio==2.8.0
 # Avoid qwen-tts pulling another generic torch build over the verified pair.
-RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1 && \
-    python -c "import torch, torchaudio; from qwen_tts import Qwen3TTSModel; print(torch.__version__, torchaudio.__version__)"
+# Keep imports in separate layers so CI annotations identify the exact binary
+# or package that fails instead of collapsing three checks into one message.
+RUN python -c "import torch; print(torch.__version__)"
+RUN python -c "import torchaudio; print(torchaudio.__version__)"
+RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1
+RUN python -c "from qwen_tts import Qwen3TTSModel; print(Qwen3TTSModel.__name__)"
 
 # Keep model layers independent of frequently changed application code. Future
 # server-only fixes then reuse the multi-GB weights instead of downloading them.
