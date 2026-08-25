@@ -17,6 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/ai-interpreter
 COPY CloudServer/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
+# Preserve the CUDA-matched torch/torchaudio pair supplied by the NGC base.
+# qwen-tts declares a newer generic torch dependency which otherwise replaces
+# only torch and leaves torchaudio with an incompatible binary ABI.
+RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1 && \
+    python -c "import torch, torchaudio; from qwen_tts import Qwen3TTSModel; print(torch.__version__, torchaudio.__version__)"
 
 # Keep model layers independent of frequently changed application code. Future
 # server-only fixes then reuse the multi-GB weights instead of downloading them.
