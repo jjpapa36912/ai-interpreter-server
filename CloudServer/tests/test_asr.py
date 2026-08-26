@@ -9,20 +9,28 @@ from app.asr import (
 class StableASRCommitterTests(unittest.TestCase):
     def test_confirmed_phrase_accumulator_keeps_later_speech_connected(self):
         phrases = ConfirmedPhraseAccumulator()
-        self.assertEqual(phrases.append("Before Friday's interview,"),
-                         "Before Friday's interview,")
+        self.assertEqual(phrases.append("Before Friday's interview,"), "")
         self.assertEqual(phrases.append("please ask Sarah"), "")
         self.assertEqual(phrases.append("Chen to confirm"), "")
-        self.assertEqual(
-            phrases.append("whether the revised launch budget"),
-            "please ask Sarah Chen to confirm whether the revised launch budget",
-        )
+        self.assertEqual(phrases.append("whether the revised launch budget"), "")
+        self.assertEqual(phrases.append("is final."),
+                         "Before Friday's interview, please ask Sarah Chen to confirm "
+                         "whether the revised launch budget is final.")
 
     def test_confirmed_phrase_accumulator_bounds_unpunctuated_first_phrase(self):
-        phrases = ConfirmedPhraseAccumulator(first_maximum_words=7)
+        phrases = ConfirmedPhraseAccumulator(first_maximum_words=8)
         self.assertEqual(phrases.append("하나 둘 셋"), "")
-        self.assertEqual(phrases.append("넷 다섯 여섯 일곱"),
-                         "하나 둘 셋 넷 다섯 여섯 일곱")
+        self.assertEqual(phrases.append("넷 다섯 여섯 일곱"), "")
+        self.assertEqual(phrases.append("여덟"),
+                         "하나 둘 셋 넷 다섯 여섯 일곱 여덟")
+
+    def test_comma_does_not_split_idiom_from_right_context(self):
+        phrases = ConfirmedPhraseAccumulator()
+        self.assertEqual(phrases.append("The rollout is back on track,"), "")
+        self.assertEqual(
+            phrases.append("but we are not out of the woods yet."),
+            "The rollout is back on track, but we are not out of the woods yet.",
+        )
 
     def test_confirmed_phrase_accumulator_flushes_final_remainder(self):
         phrases = ConfirmedPhraseAccumulator()

@@ -207,6 +207,49 @@ async def stream_asr(websocket: WebSocket) -> None:
     phrase_accumulator = ConfirmedPhraseAccumulator()
     translation_session_id = f"ws-{id(websocket)}"
     target_language = "ko" if language == "en" else "en"
+    # One item may be synthesizing while at most two fresh utterances wait.
+    # Anything older is obsolete for live interpretation and is discarded.
+    tts_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=2)
+    send_lock = asyncio.Lock()
+
+    async def send_json(message: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(message)
+
+    async def send_bytes(payload: bytes) -> None:
+        async with send_lock:
+            await websocket.send_bytes(payload)
+
+    def next_tts_chunk(iterator):
+        try:
+            return next(iterator)
+        except StopIteration:
+            return None
+
+    async def stream_translated_speech() -> None:
+        while True:
+            item = await tts_queue.get()
+            translated_text, translated_language = item
+            try:
+                await send_json({
+                    "type": "tts_start", "sample_rate": 24_000,
+                })
+                iterator = neural_tts().synthesize_stream(
+                    translated_text, translated_language
+                )
+                while True:
+                    generated = await asyncio.to_thread(next_tts_chunk, iterator)
+                    if generated is None:
+                        break
+                    pcm, _sample_rate = generated
+                    await send_bytes(pcm)
+                await send_json({"type": "tts_end"})
+            except Exception as error:
+                await send_json({
+                    "type": "tts_error", "error": str(error),
+                })
+
+    tts_task = asyncio.create_task(stream_translated_speech())
 
     async def decode(final: bool) -> None:
         if not session.pcm:
@@ -233,15 +276,27 @@ async def stream_asr(websocket: WebSocket) -> None:
             translation_latency_ms = round(
                 (time.perf_counter() - translation_started) * 1000, 1
             )
-        await websocket.send_json({
+        await send_json({
             "type": "asr",
             **decision,
             "translation": translation,
             "translation_latency_ms": translation_latency_ms,
+            "inline_tts": translation is not None,
             "audio_seconds": round(session.audio_seconds, 3),
             "latency_ms": round(latency_ms, 1),
             "model": settings.asr_model,
         })
+        if translation:
+            try:
+                tts_queue.put_nowait((translation, target_language))
+            except asyncio.QueueFull:
+                # Preserve live speech: discard the oldest voice request, never
+                # accumulate obsolete translated audio behind the speaker.
+                try:
+                    tts_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                tts_queue.put_nowait((translation, target_language))
 
     try:
         while True:
@@ -259,15 +314,18 @@ async def stream_asr(websocket: WebSocket) -> None:
                     session = StreamingASRSession(sample_rate=sample_rate)
             elif command == "finish":
                 await decode(final=True)
-                await websocket.send_json({"type": "finished"})
+                await send_json({"type": "finished"})
                 break
             elif command == "reset":
                 session = StreamingASRSession(sample_rate=sample_rate)
                 phrase_accumulator.reset()
-                await websocket.send_json({"type": "reset"})
+                await send_json({"type": "reset"})
             else:
-                await websocket.send_json({"type": "error", "error": "unknown message"})
+                await send_json({"type": "error", "error": "unknown message"})
     except WebSocketDisconnect:
         pass
     finally:
+        # Never keep a disconnected client alive while obsolete speech drains.
+        tts_task.cancel()
+        await asyncio.gather(tts_task, return_exceptions=True)
         translator().reset(translation_session_id)

@@ -20,7 +20,14 @@ class PromptTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             interpreter_instruction("ja", "ko")
 
+    def test_streaming_prompt_requires_conservative_asr_repair_and_fidelity(self):
+        prompt = interpreter_instruction("en", "ko")
+        self.assertIn("finalized streaming ASR", prompt)
+        self.assertIn("when uncertain, preserve the source", prompt)
+        self.assertIn("currencies and units exactly", prompt)
+        self.assertIn("compound terms by meaning", prompt)
+        self.assertIn("idioms and phrasal expressions", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
-

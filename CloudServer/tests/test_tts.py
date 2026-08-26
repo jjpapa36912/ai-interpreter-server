@@ -30,5 +30,22 @@ class CUDANeuralTTSTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "en or ko"):
             engine.synthesize("bonjour", "fr")
 
+    def test_accelerated_backend_yields_true_streaming_chunks(self):
+        engine = CUDANeuralTTS(Settings())
+        engine.model = Mock()
+        engine.model.generate_custom_voice_streaming.return_value = iter([
+            (np.asarray([0.1], dtype=np.float32), 24_000, None),
+            (np.asarray([0.2], dtype=np.float32), 24_000, None),
+        ])
+        engine.loaded = True
+        engine.streaming_available = True
+
+        chunks = list(engine.synthesize_stream("확정된 문장입니다.", "ko"))
+
+        self.assertEqual(len(chunks), 2)
+        kwargs = engine.model.generate_custom_voice_streaming.call_args.kwargs
+        self.assertFalse(kwargs["non_streaming_mode"])
+        self.assertEqual(kwargs["chunk_size"], 4)
+
 if __name__ == "__main__":
     unittest.main()

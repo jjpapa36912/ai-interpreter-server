@@ -26,8 +26,12 @@ def _normalized(word: str) -> str:
     return word.casefold().strip(".,!?;:\"")
 
 
-def _ends_translation_boundary(word: str) -> bool:
-    return word.endswith((",", ";", ":", ".", "?", "!", "。", "？", "！"))
+def _ends_sentence_boundary(word: str) -> bool:
+    # A comma/colon is useful for captions but does not provide enough right
+    # context for an irreversible spoken translation.  In particular, idioms,
+    # corrections and negation were mistranslated when the left clause was
+    # synthesized independently.
+    return word.endswith((".", "?", "!", "。", "？", "！"))
 
 
 @dataclass
@@ -40,9 +44,9 @@ class ConfirmedPhraseAccumulator:
     bounded for startup; later phrases keep enough context for natural speech.
     """
 
-    first_maximum_words: int = 7
-    following_minimum_words: int = 6
-    following_maximum_words: int = 11
+    first_maximum_words: int = 18
+    following_minimum_words: int = 8
+    following_maximum_words: int = 24
     pending: list[str] = field(default_factory=list)
     emitted_first: bool = False
 
@@ -50,14 +54,14 @@ class ConfirmedPhraseAccumulator:
         self.pending.extend(_words(delta))
         if not self.pending:
             return ""
-        minimum = 3 if not self.emitted_first else self.following_minimum_words
+        minimum = 4 if not self.emitted_first else self.following_minimum_words
         maximum = (
             self.first_maximum_words
             if not self.emitted_first else self.following_maximum_words
         )
         boundary = next((
             index + 1 for index, word in enumerate(self.pending)
-            if index + 1 >= minimum and _ends_translation_boundary(word)
+            if index + 1 >= minimum and _ends_sentence_boundary(word)
         ), None)
         count = len(self.pending) if final else boundary
         if count is None and len(self.pending) >= maximum:

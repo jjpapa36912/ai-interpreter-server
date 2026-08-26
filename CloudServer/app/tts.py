@@ -89,7 +89,11 @@ class CUDANeuralTTS:
                     speaker=speaker,
                     instruct=instruct,
                     chunk_size=4,
-                    non_streaming_mode=True,
+                    # The old value waited for the complete utterance before
+                    # yielding anything, despite the streaming HTTP endpoint.
+                    # Emit codec chunks as they are generated so first audio is
+                    # not tied to total sentence duration.
+                    non_streaming_mode=False,
                 ):
                     pcm = self._pcm(waveform)
                     if pcm:
