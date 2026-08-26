@@ -15,4 +15,3 @@ soundfile==0.13.1
 sox==1.5.0
 onnxruntime==1.22.1
 einops==0.8.1
-faster-qwen3-tts==0.3.2
