@@ -7,6 +7,13 @@ from app.asr import (
 
 
 class StableASRCommitterTests(unittest.TestCase):
+    def test_first_complete_three_word_sentence_flushes_immediately(self):
+        accumulator = ConfirmedPhraseAccumulator()
+        self.assertEqual(
+            accumulator.append("It provides stability."),
+            "It provides stability.",
+        )
+
     def test_confirmed_phrase_accumulator_keeps_later_speech_connected(self):
         phrases = ConfirmedPhraseAccumulator()
         self.assertEqual(phrases.append("Before Friday's interview,"), "")

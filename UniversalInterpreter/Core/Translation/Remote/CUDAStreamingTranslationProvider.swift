@@ -147,6 +147,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private var debugSessionID = UUID()
     private var forwardedAudioMilliseconds: Double = 0
     private var receivedFirstInlinePCM = false
+    private let usesLocalTranslation = ProcessInfo.processInfo.environment[
+        "AI_INTERPRETER_GPU_LOCAL_TRANSLATION"
+    ] == "1"
+    private var ownsLocalWorker = false
 
     init(
         configuration: CUDAStreamingServerConfiguration,
@@ -191,6 +195,11 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         receivedFirstInlinePCM = false
         metrics = AudioPipelineMetrics()
         pendingError = nil
+        if usesLocalTranslation {
+            try await LocalModelWorker.shared.acquire()
+            ownsLocalWorker = true
+            try await LocalModelWorker.shared.resetContext()
+        }
         // G-Cube exposes this workload through a single public connection slot.
         // While that slot is briefly handed from ASR WebSocket to HTTP TTS,
         // retain enough source audio to replay it after reconnecting. This is
@@ -283,6 +292,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         sessionStartedAt = nil
         inlinePlaybackGroupID = nil
         inlineSampleRate = CosyVoiceStreamingClient.sampleRate
+        if ownsLocalWorker {
+            ownsLocalWorker = false
+            await LocalModelWorker.shared.release()
+        }
     }
 
     private func connectSocket(
@@ -300,6 +313,9 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 name: "connection_attempt",
                 value: "\(attempt)-\(UUID().uuidString)"
             ))
+            if usesLocalTranslation {
+                queryItems.append(URLQueryItem(name: "translate", value: "0"))
+            }
             components?.queryItems = queryItems
             guard let url = components?.url else {
                 throw CUDAStreamingProviderError.invalidEndpoint
@@ -462,6 +478,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                     metrics.droppedChunks += 1
                     continue
                 }
+                if decoded.type == "tts_queued" { continue }
                 if let latency = decoded.latencyMilliseconds {
                     metrics.asrMilliseconds = latency
                 }
@@ -536,8 +553,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
 
     private func translateAndSynthesize(_ request: QueuedSource) async {
         guard let sourceLanguage, let targetLanguage else { return }
+        let translationKind: TTSQueuePolicy.TranslationKind = usesLocalTranslation
+            ? .confirmed : .simultaneousCommitted
         guard !TTSQueuePolicy.isStale(
-            .simultaneousCommitted,
+            translationKind,
             text: request.text,
             enqueuedAt: request.enqueuedAt
         ) else {
@@ -545,8 +564,28 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             return
         }
         do {
-            let response: (text: String, milliseconds: Double)
-            if let translation = request.translation?.trimmingCharacters(
+            var response: (text: String, milliseconds: Double)
+            if usesLocalTranslation {
+                let started = ContinuousClock.now
+                let normalized = TranslationSemanticNormalizer.normalize(
+                    request.text, source: sourceLanguage, target: targetLanguage
+                )
+                let result = try await LocalModelWorker.shared.translateText(
+                    text: normalized,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage,
+                    preferredTerms: []
+                )
+                guard let translation = result.translation,
+                      !translation.isEmpty else {
+                    throw CUDAStreamingProviderError.invalidMessage
+                }
+                response = (
+                    translation,
+                    result.translationMilliseconds
+                        ?? started.duration(to: .now).milliseconds
+                )
+            } else if let translation = request.translation?.trimmingCharacters(
                 in: .whitespacesAndNewlines
             ), !translation.isEmpty {
                 response = (translation, request.translationMilliseconds ?? 0)
@@ -570,6 +609,13 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                     return result
                 }
             }
+            if targetLanguage == .korean {
+                response.text = KoreanSpeechTextNormalizer.normalize(
+                    KoreanTranslationNaturalizer.normalize(
+                        KoreanHonorificNormalizer.normalize(response.text)
+                    )
+                )
+            }
             metrics.translationMilliseconds = response.milliseconds
             metrics.translationPhrase = response.text
             if metrics.firstStableTranslationMilliseconds == nil,
@@ -577,7 +623,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 metrics.firstStableTranslationMilliseconds = sessionStartedAt.duration(to: .now).milliseconds
             }
             guard !TTSQueuePolicy.isStale(
-                .simultaneousCommitted,
+                translationKind,
                 text: response.text,
                 enqueuedAt: request.enqueuedAt
             ) else {
@@ -587,6 +633,32 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             let synthesisStarted = ContinuousClock.now
             let groupID = UUID()
             let continuation = outputContinuation
+            let responseText = response.text
+            if usesLocalTranslation, let socket {
+                struct SpeakRequest: Encodable {
+                    let type = "speak"
+                    let text: String
+                    let language: String
+                }
+                let data = try JSONEncoder().encode(SpeakRequest(
+                    text: responseText, language: targetLanguage.rawValue
+                ))
+                guard let command = String(data: data, encoding: .utf8) else {
+                    throw CUDAStreamingProviderError.invalidMessage
+                }
+                try await socket.send(.string(command))
+                await recordDebug(
+                    event: "gpu_local_translation_queued",
+                    source: request.text, translation: responseText,
+                    operationMilliseconds: response.milliseconds
+                )
+                // Audio arrives asynchronously through receiveMessages. Do not
+                // close or hand off the ASR socket while the voice is speaking.
+                metrics.synthesisMilliseconds = synthesisStarted
+                    .duration(to: .now).milliseconds
+                metrics.outputChunks += 1
+                return
+            }
             // Legacy one-service deployments need a short transport handoff.
             // Production uses a dedicated TTS service URL, allowing ASR and
             // true-streaming voice generation to run concurrently.
@@ -598,7 +670,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask { [neuralTTS] in
                         try await neuralTTS.synthesize(
-                            text: response.text,
+                            text: responseText,
                             language: targetLanguage
                         ) { chunk in
                             switch continuation.yield(chunk.groupedForPlayback(groupID)) {

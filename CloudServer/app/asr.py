@@ -53,8 +53,10 @@ class ConfirmedPhraseAccumulator:
     bounded for startup; later phrases keep enough context for natural speech.
     """
 
-    # Startup speech must not wait for an entire long sentence. Eight words
-    # still provide a meaningful translation unit while bounding first audio.
+    # A complete three-word sentence ("It provides stability.") is already a
+    # safe translation unit. Do not wait for words from the next sentence.
+    # Unpunctuated startup speech remains bounded at eight words and the open-word
+    # guard below still extends a dangling function word for right context.
     first_maximum_words: int = 8
     following_minimum_words: int = 6
     following_maximum_words: int = 24
@@ -65,7 +67,7 @@ class ConfirmedPhraseAccumulator:
         self.pending.extend(_words(delta))
         if not self.pending:
             return ""
-        minimum = 4 if not self.emitted_first else self.following_minimum_words
+        minimum = 3 if not self.emitted_first else self.following_minimum_words
         maximum = (
             self.first_maximum_words
             if not self.emitted_first else self.following_maximum_words

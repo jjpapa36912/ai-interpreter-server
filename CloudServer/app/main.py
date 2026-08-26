@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import time
 import asyncio
+import json
 import threading
 from functools import lru_cache
 
@@ -254,9 +255,12 @@ async def stream_asr(websocket: WebSocket) -> None:
     phrase_accumulator = ConfirmedPhraseAccumulator()
     translation_session_id = f"ws-{id(websocket)}"
     target_language = "ko" if language == "en" else "en"
-    # One item may be synthesizing while at most two fresh utterances wait.
-    # Anything older is obsolete for live interpretation and is discarded.
-    tts_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=2)
+    # Hybrid clients translate the committed source with their validated local
+    # model, then send the final Korean text back over this same WebSocket.  A
+    # larger bounded queue preserves complete thoughts during a short TTS burst
+    # without allowing an unbounded minutes-long voice backlog.
+    tts_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=8)
+    translate_inline = websocket.query_params.get("translate", "1") != "0"
     send_lock = asyncio.Lock()
 
     async def send_json(message: dict) -> None:
@@ -305,7 +309,7 @@ async def stream_asr(websocket: WebSocket) -> None:
         decision["committed_delta"] = committed_delta
         translation = None
         translation_latency_ms = None
-        if committed_delta:
+        if committed_delta and translate_inline:
             translation_started = time.perf_counter()
             translation = await asyncio.to_thread(
                 translator().translate,
@@ -361,6 +365,27 @@ async def stream_asr(websocket: WebSocket) -> None:
                 session = StreamingASRSession(sample_rate=sample_rate)
                 phrase_accumulator.reset()
                 await send_json({"type": "reset"})
+            elif command:
+                try:
+                    request = json.loads(command)
+                except (TypeError, json.JSONDecodeError):
+                    request = {}
+                if request.get("type") == "speak":
+                    text = str(request.get("text", "")).strip()
+                    spoken_language = str(request.get("language", target_language))
+                    if text and spoken_language in {"en", "ko"}:
+                        try:
+                            tts_queue.put_nowait((text, spoken_language))
+                            await send_json({"type": "tts_queued"})
+                        except asyncio.QueueFull:
+                            await send_json({
+                                "type": "tts_error",
+                                "error": "voice queue is full",
+                            })
+                    else:
+                        await send_json({"type": "error", "error": "invalid speak request"})
+                else:
+                    await send_json({"type": "error", "error": "unknown message"})
             else:
                 await send_json({"type": "error", "error": "unknown message"})
     except WebSocketDisconnect:

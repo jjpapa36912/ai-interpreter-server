@@ -44,11 +44,12 @@ if [[ "${OPEN_APP:-1}" == "1" ]]; then
             print -u2 "AI_INTERPRETER_STREAMING_SERVER_URL이 설정되지 않았습니다."
             exit 1
         fi
-        # Proven local ASR/translation plus GPU neural voice. This avoids the
-        # slower GPU translation model and G-Cube's unreliable HTTP streaming;
-        # CosyVoiceStreamingClient uses the dedicated TTS WebSocket endpoint.
+        # GPU streaming ASR removes Nemotron's long first-hypothesis lookahead.
+        # The validated local translator keeps translation quality, and its
+        # final text returns over the same WebSocket for GPU neural speech.
         open --env AI_INTERPRETER_DISABLE_REMOTE_TRANSLATION=1 \
-            --env AI_INTERPRETER_DISABLE_GPU_STREAMING=1 \
+            --env AI_INTERPRETER_DISABLE_GPU_STREAMING=0 \
+            --env AI_INTERPRETER_GPU_LOCAL_TRANSLATION=1 \
             --env AI_INTERPRETER_SIMULTANEOUS_TTS=0 \
             --env AI_INTERPRETER_TTS_SERVER_URL="${AI_INTERPRETER_TTS_SERVER_URL:-${AI_INTERPRETER_STREAMING_SERVER_URL}}" \
             --env AI_INTERPRETER_TTS_SERVER_TOKEN="${AI_INTERPRETER_TTS_SERVER_TOKEN:-${AI_INTERPRETER_STREAMING_SERVER_TOKEN:-}}" \
