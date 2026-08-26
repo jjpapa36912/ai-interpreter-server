@@ -40,11 +40,10 @@ class StableASRCommitterTests(unittest.TestCase):
         final = committer.update("yeah to just have the same sort of idiom", final=True)
         self.assertEqual(final["committed_delta"], "the same sort of idiom")
 
-    def test_default_requires_three_decodes_before_commit(self):
+    def test_default_requires_two_decodes_before_commit(self):
         committer = StableASRCommitter()
         self.assertEqual(committer.update("다음 주")["committed_delta"], "")
-        self.assertEqual(committer.update("다음 좋아요")["committed_delta"], "")
-        self.assertEqual(committer.update("다음 좋아요 1명")["committed_delta"], "다음")
+        self.assertEqual(committer.update("다음 좋아요")["committed_delta"], "다음")
         self.assertEqual(committer.update("다음 주 화요일")["committed_delta"], "")
 
 

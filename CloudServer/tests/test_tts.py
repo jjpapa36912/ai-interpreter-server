@@ -30,6 +30,20 @@ class CUDANeuralTTSTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "en or ko"):
             engine.synthesize("bonjour", "fr")
 
+    def test_stream_silence_cleanup_spans_chunks(self):
+        state = {"started": False, "pending_silence": 0}
+        first = CUDANeuralTTS._remove_excess_silence(
+            np.r_[np.zeros(1_000), np.ones(100), np.zeros(3_000)], 1_000, state
+        )
+        second = CUDANeuralTTS._remove_excess_silence(
+            np.ones(100), 1_000, state
+        )
+
+        # Leading padding is gone and the 3 s cross-chunk pause is 160 ms.
+        self.assertEqual(len(first), 100)
+        self.assertEqual(len(second), 260)
+        self.assertTrue(np.all(second[:160] == 0))
+
 
 if __name__ == "__main__":
     unittest.main()

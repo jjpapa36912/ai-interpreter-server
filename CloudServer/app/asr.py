@@ -50,7 +50,10 @@ class StableASRCommitter:
     """Commit only words preserved by two consecutive cumulative decodes."""
 
     lookahead_words: int = 2
-    agreement_decodes: int = 3
+    # Two matching incremental decodes still make this confirmed-only, while
+    # avoiding the extra 300 ms turn that pushed first translated speech near
+    # two seconds even on a warm GPU.
+    agreement_decodes: int = 2
     uncommitted_history: list[list[str]] = field(default_factory=list)
     committed: list[str] = field(default_factory=list)
 
@@ -175,8 +178,8 @@ class CUDASpeechRecognizer:
 @dataclass
 class StreamingASRSession:
     sample_rate: int = 16_000
-    minimum_decode_seconds: float = 0.6
-    decode_interval_seconds: float = 0.3
+    minimum_decode_seconds: float = 0.4
+    decode_interval_seconds: float = 0.2
     maximum_audio_seconds: float = 20.0
     pcm: bytearray = field(default_factory=bytearray)
     last_decode_bytes: int = 0

@@ -64,6 +64,33 @@ class CUDANeuralTTS:
         waveform = np.nan_to_num(waveform, nan=0.0, posinf=1.0, neginf=-1.0)
         return (np.clip(waveform, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
+    @staticmethod
+    def _remove_excess_silence(waveform, sample_rate: int, state: dict) -> np.ndarray:
+        """Remove model padding and cap unnatural pauses across stream chunks.
+
+        Qwen can place 0.5--1.1 s of digital/near-digital silence at the start
+        or inside a short live utterance. That silence was audible as repeated
+        speech drop-outs and also delayed the first actual phoneme. Keep a
+        natural 160 ms pause between voiced regions and discard leading and
+        trailing model padding. State is shared across generated chunks so a
+        pause split at a chunk boundary is handled as one pause.
+        """
+        samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
+        threshold = 0.001
+        maximum_pause = max(1, int(sample_rate * 0.16))
+        output: list[float] = []
+        for sample in samples:
+            if abs(float(sample)) < threshold:
+                if state["started"]:
+                    state["pending_silence"] += 1
+                continue
+            if state["started"] and state["pending_silence"]:
+                output.extend([0.0] * min(state["pending_silence"], maximum_pause))
+            state["pending_silence"] = 0
+            state["started"] = True
+            output.append(float(sample))
+        return np.asarray(output, dtype=np.float32)
+
     def synthesize_stream(self, text: str, language: str, voice_id: str | None = None):
         """Yield playable PCM while CUDA generation is still in progress."""
         if language not in {"en", "ko"}:
@@ -76,6 +103,7 @@ class CUDANeuralTTS:
             self.settings.tts_korean_voice if language == "ko"
             else self.settings.tts_english_voice
         )
+        silence_state = {"started": False, "pending_silence": 0}
         model_language = "Korean" if language == "ko" else "English"
         instruct = (
             "자연스럽고 또렷한 대화체로 말해 주세요." if language == "ko" else
@@ -91,7 +119,10 @@ class CUDANeuralTTS:
                     chunk_size=4,
                     non_streaming_mode=True,
                 ):
-                    pcm = self._pcm(waveform)
+                    cleaned = self._remove_excess_silence(
+                        waveform, int(sample_rate), silence_state
+                    )
+                    pcm = self._pcm(cleaned)
                     if pcm:
                         yield pcm, int(sample_rate)
                 return
@@ -101,7 +132,10 @@ class CUDANeuralTTS:
                 speaker=speaker,
                 instruct=instruct,
             )
-            pcm = self._pcm(wavs[0])
+            cleaned = self._remove_excess_silence(
+                wavs[0], int(sample_rate), silence_state
+            )
+            pcm = self._pcm(cleaned)
             if pcm:
                 yield pcm, int(sample_rate)
 
