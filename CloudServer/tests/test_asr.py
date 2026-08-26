@@ -5,7 +5,9 @@ from app.asr import StableASRCommitter, StreamCommitLedger, StreamingASRSession
 
 class StableASRCommitterTests(unittest.TestCase):
     def test_committer_emits_only_new_stable_words(self):
-        committer = StableASRCommitter(lookahead_words=2, agreement_decodes=2)
+        committer = StableASRCommitter(
+            lookahead_words=2, agreement_decodes=2, minimum_commit_words=1
+        )
         self.assertEqual(committer.update("we need a", final=False)["committed_delta"], "")
         first = committer.update("we need a better plan today", final=False)
         self.assertEqual(first["committed_delta"], "we")
@@ -16,7 +18,9 @@ class StableASRCommitterTests(unittest.TestCase):
 
 
     def test_committer_never_repeats_committed_prefix(self):
-        committer = StableASRCommitter(lookahead_words=1, agreement_decodes=2)
+        committer = StableASRCommitter(
+            lookahead_words=1, agreement_decodes=2, minimum_commit_words=1
+        )
         committer.update("hello from the meeting")
         self.assertEqual(
             committer.update("hello from the meeting today")["committed_delta"],
@@ -28,7 +32,9 @@ class StableASRCommitterTests(unittest.TestCase):
         )
 
     def test_revision_aligns_after_committed_suffix(self):
-        committer = StableASRCommitter(lookahead_words=2, agreement_decodes=2)
+        committer = StableASRCommitter(
+            lookahead_words=2, agreement_decodes=2, minimum_commit_words=1
+        )
         committer.update("yeah")
         self.assertEqual(committer.update("yeah")["committed_delta"], "yeah")
         committer.update("yeah yeah yeah to just have sort of")
@@ -42,9 +48,11 @@ class StableASRCommitterTests(unittest.TestCase):
 
     def test_default_requires_two_decodes_before_commit(self):
         committer = StableASRCommitter()
-        self.assertEqual(committer.update("다음 주")["committed_delta"], "")
-        self.assertEqual(committer.update("다음 좋아요")["committed_delta"], "다음")
-        self.assertEqual(committer.update("다음 주 화요일")["committed_delta"], "")
+        self.assertEqual(committer.update("다음 주 화요일에 만나요")["committed_delta"], "")
+        self.assertEqual(
+            committer.update("다음 주 화요일에 만나요 여러분")["committed_delta"],
+            "다음 주 화요일에",
+        )
 
 
     def test_streaming_session_decodes_on_bounded_cadence(self):

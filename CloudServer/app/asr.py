@@ -49,11 +49,15 @@ def _uncommitted_tail(committed: list[str], current: list[str]) -> list[str] | N
 class StableASRCommitter:
     """Commit only words preserved by two consecutive cumulative decodes."""
 
-    lookahead_words: int = 2
+    lookahead_words: int = 1
     # Two matching incremental decodes still make this confirmed-only, while
     # avoiding the extra 300 ms turn that pushed first translated speech near
     # two seconds even on a warm GPU.
     agreement_decodes: int = 2
+    # A one-word confirmed delta is technically stable but is not a usable
+    # simultaneous-translation unit. Translating and synthesizing each word
+    # separately produced vowel-like fragments instead of intelligible speech.
+    minimum_commit_words: int = 3
     uncommitted_history: list[list[str]] = field(default_factory=list)
     committed: list[str] = field(default_factory=list)
 
@@ -78,6 +82,8 @@ class StableASRCommitter:
             # retain two lookahead words once the hypothesis becomes longer.
             hold = min(self.lookahead_words, max(0, stable_count - 1))
             commit_count = len(tail) if final else max(0, stable_count - hold)
+            if not final and commit_count < self.minimum_commit_words:
+                commit_count = 0
             delta = tail[:commit_count]
             self.committed.extend(delta)
             history = [prior[commit_count:] for prior in self.uncommitted_history]
