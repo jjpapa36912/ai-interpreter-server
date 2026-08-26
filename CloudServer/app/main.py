@@ -19,7 +19,7 @@ from .asr import (
 from .tts import CUDANeuralTTS
 
 
-app = FastAPI(title="AI Interpreter CUDA Server", version="0.1.0")
+app = FastAPI(title="AI Interpreter CUDA Server", version="0.2.0")
 
 _preload_lock = threading.Lock()
 _preload_started = False
