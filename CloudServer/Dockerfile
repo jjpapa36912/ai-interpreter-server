@@ -20,16 +20,17 @@ COPY CloudServer/scripts/patch_qwen_tts_12hz.py ./scripts/patch_qwen_tts_12hz.py
 RUN python -m pip install --no-cache-dir -r requirements.txt
 # NGC 25.08 ships a PyTorch 2.8 development snapshot. Pairing that snapshot
 # with a released torchaudio wheel causes an undefined-symbol ABI failure.
-# Install the official CUDA 12.8 PyTorch/torchaudio 2.8.0 pair together; the
+# Install the official CUDA 12.8 PyTorch family together; the
 # RTX 5090 driver is backward-compatible with this CUDA runtime.
 RUN PIP_CONSTRAINT= python -m pip install --no-cache-dir --force-reinstall \
       --index-url https://download.pytorch.org/whl/cu128 \
-      torch==2.8.0 torchaudio==2.8.0
+      torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0
 # Avoid qwen-tts pulling another generic torch build over the verified pair.
 # Keep imports in separate layers so CI annotations identify the exact binary
 # or package that fails instead of collapsing three checks into one message.
 RUN python -c "import torch; print(torch.__version__)"
 RUN python -c "import torchaudio; print(torchaudio.__version__)"
+RUN python -c "import torchvision; print(torchvision.__version__)"
 RUN python -m pip install --no-cache-dir --no-deps qwen-tts==0.1.1
 RUN python ./scripts/patch_qwen_tts_12hz.py
 
