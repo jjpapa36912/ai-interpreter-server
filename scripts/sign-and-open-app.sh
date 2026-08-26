@@ -3,6 +3,7 @@
 set -euo pipefail
 
 project_root="${0:A:h:h}"
+nemotron_model="${project_root}/ModelLab/models/trained/nemotron-asr-acoustic-v2.q8_0.gguf"
 requested_identity="${APP_SIGNING_IDENTITY:-}"
 signing_identity="${requested_identity}"
 
@@ -39,7 +40,14 @@ pkill -TERM -x UniversalInterpreter 2>/dev/null || true
 APP_SIGNING_IDENTITY="${signing_identity}" ./scripts/build-app.sh
 if [[ "${OPEN_APP:-1}" == "1" ]]; then
     if [[ "${DISABLE_GPU_TRANSLATION:-1}" == "1" ]]; then
+        # Force a genuinely local process even when launchctl still contains a
+        # streaming-server URL from an earlier GPU test.  Previously only the
+        # legacy HTTP translator was disabled, so the app silently selected
+        # GPU Streaming and made a "local" validation hit G-Cube.
         open --env AI_INTERPRETER_DISABLE_REMOTE_TRANSLATION=1 \
+            --env AI_INTERPRETER_DISABLE_GPU_STREAMING=1 \
+            --env AI_INTERPRETER_SIMULTANEOUS_TTS=0 \
+            --env AI_INTERPRETER_NEMOTRON_MODEL="${nemotron_model}" \
             "${project_root}/outputs/AI Interpreter.app"
         print "AI Interpreter를 GPU 번역 서버 없이 빌드하고 실행했습니다."
     else
@@ -54,6 +62,7 @@ if [[ "${OPEN_APP:-1}" == "1" ]]; then
             --env AI_INTERPRETER_STREAMING_SERVER_TOKEN="${AI_INTERPRETER_STREAMING_SERVER_TOKEN:-}" \
             --env AI_INTERPRETER_TTS_SERVER_URL="${AI_INTERPRETER_TTS_SERVER_URL:-${AI_INTERPRETER_STREAMING_SERVER_URL}}" \
             --env AI_INTERPRETER_TTS_SERVER_TOKEN="${AI_INTERPRETER_TTS_SERVER_TOKEN:-${AI_INTERPRETER_STREAMING_SERVER_TOKEN:-}}" \
+            --env AI_INTERPRETER_NEMOTRON_MODEL="${nemotron_model}" \
             "${project_root}/outputs/AI Interpreter.app"
         print "AI Interpreter를 GPU 번역 서버와 함께 빌드하고 실행했습니다."
     fi

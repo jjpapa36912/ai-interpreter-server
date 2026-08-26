@@ -107,6 +107,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         let latencyMilliseconds: Double?
         let translation: String?
         let translationMilliseconds: Double?
+        let inlineTTS: Bool?
+        let sampleRate: Double?
 
         enum CodingKeys: String, CodingKey {
             case type, hypothesis
@@ -114,6 +116,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             case latencyMilliseconds = "latency_ms"
             case translation
             case translationMilliseconds = "translation_latency_ms"
+            case inlineTTS = "inline_tts"
+            case sampleRate = "sample_rate"
         }
     }
 
@@ -138,6 +142,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private var metrics = AudioPipelineMetrics()
     private var sessionStartedAt: ContinuousClock.Instant?
     private var pendingError: Error?
+    private var inlinePlaybackGroupID: UUID?
+    private var inlineSampleRate = CosyVoiceStreamingClient.sampleRate
 
     init(
         configuration: CUDAStreamingServerConfiguration,
@@ -265,6 +271,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         sourceLanguage = nil
         targetLanguage = nil
         sessionStartedAt = nil
+        inlinePlaybackGroupID = nil
+        inlineSampleRate = CosyVoiceStreamingClient.sampleRate
     }
 
     private func connectSocket(
@@ -403,11 +411,40 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 let message = try await socket.receive()
                 let data: Data
                 switch message {
-                case let .data(value): data = value
+                case let .data(value):
+                    guard let groupID = inlinePlaybackGroupID,
+                          value.count.isMultiple(of: MemoryLayout<Int16>.size)
+                    else { throw CUDAStreamingProviderError.invalidMessage }
+                    let chunk = AudioChunk(
+                        samples: CosyVoiceStreamingClient.decodePCM16(value),
+                        format: AudioFormatInfo(
+                            sampleRate: inlineSampleRate,
+                            channelCount: 1, bitsPerChannel: 16
+                        ),
+                        capturedAt: .now, playbackGroupID: groupID
+                    )
+                    _ = outputContinuation.yield(chunk)
+                    continue
                 case let .string(value): data = Data(value.utf8)
                 @unknown default: throw CUDAStreamingProviderError.invalidMessage
                 }
                 let decoded = try JSONDecoder().decode(ASRMessage.self, from: data)
+                if decoded.type == "tts_start" {
+                    inlinePlaybackGroupID = UUID()
+                    inlineSampleRate = decoded.sampleRate
+                        ?? CosyVoiceStreamingClient.sampleRate
+                    continue
+                }
+                if decoded.type == "tts_end" {
+                    inlinePlaybackGroupID = nil
+                    metrics.outputChunks += 1
+                    continue
+                }
+                if decoded.type == "tts_error" {
+                    inlinePlaybackGroupID = nil
+                    metrics.droppedChunks += 1
+                    continue
+                }
                 if let latency = decoded.latencyMilliseconds {
                     metrics.asrMilliseconds = latency
                 }
@@ -427,12 +464,25 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                        let sessionStartedAt {
                         metrics.firstStableCommitMilliseconds = sessionStartedAt.duration(to: .now).milliseconds
                     }
-                    translationContinuation?.yield(QueuedSource(
-                        text: delta,
-                        translation: decoded.translation,
-                        translationMilliseconds: decoded.translationMilliseconds,
-                        enqueuedAt: .now
-                    ))
+                    if decoded.inlineTTS == true,
+                       let translation = decoded.translation,
+                       !translation.isEmpty {
+                        metrics.translationPhrase = translation
+                        metrics.translationMilliseconds =
+                            decoded.translationMilliseconds
+                        if metrics.firstStableTranslationMilliseconds == nil,
+                           let sessionStartedAt {
+                            metrics.firstStableTranslationMilliseconds =
+                                sessionStartedAt.duration(to: .now).milliseconds
+                        }
+                    } else {
+                        translationContinuation?.yield(QueuedSource(
+                            text: delta,
+                            translation: decoded.translation,
+                            translationMilliseconds: decoded.translationMilliseconds,
+                            enqueuedAt: .now
+                        ))
+                    }
                 }
                 if decoded.type == "finished" { break }
             }

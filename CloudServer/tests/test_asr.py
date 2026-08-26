@@ -18,7 +18,7 @@ class StableASRCommitterTests(unittest.TestCase):
                          "whether the revised launch budget is final.")
 
     def test_confirmed_phrase_accumulator_bounds_unpunctuated_first_phrase(self):
-        phrases = ConfirmedPhraseAccumulator(first_maximum_words=8)
+        phrases = ConfirmedPhraseAccumulator()
         self.assertEqual(phrases.append("하나 둘 셋"), "")
         self.assertEqual(phrases.append("넷 다섯 여섯 일곱"), "")
         self.assertEqual(phrases.append("여덟"),

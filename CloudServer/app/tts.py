@@ -78,8 +78,13 @@ class CUDANeuralTTS:
         )
         model_language = "Korean" if language == "ko" else "English"
         instruct = (
-            "자연스럽고 또렷한 대화체로 말해 주세요." if language == "ko" else
-            "Speak naturally and clearly in a conversational tone."
+            "실제 전문 통역사가 바로 옆에서 말하듯 자연스럽고 또렷하게 말하세요. "
+            "입력된 문장만 정확히 읽고, 어·음·에 같은 군더더기 소리나 설명을 절대 추가하지 마세요. "
+            "문장 중간을 끊지 말고 의미 단위가 자연스럽게 이어지게 발음하세요."
+            if language == "ko" else
+            "Speak like a natural professional interpreter in a clear conversational voice. "
+            "Say only the supplied text exactly; never add fillers, commentary, or extra sounds. "
+            "Keep each thought connected and do not stop in the middle of a phrase."
         )
         with self._generation_lock:
             if self.streaming_available:

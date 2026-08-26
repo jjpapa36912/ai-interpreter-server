@@ -24,6 +24,8 @@ class CUDANeuralTTSTests(unittest.TestCase):
         kwargs = engine.model.generate_custom_voice.call_args.kwargs
         self.assertEqual(kwargs["language"], "Korean")
         self.assertEqual(kwargs["speaker"], "Sohee")
+        self.assertIn("군더더기 소리", kwargs["instruct"])
+        self.assertIn("입력된 문장만 정확히", kwargs["instruct"])
 
     def test_rejects_unsupported_language_before_loading(self):
         engine = CUDANeuralTTS(Settings())

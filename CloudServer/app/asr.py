@@ -34,6 +34,16 @@ def _ends_sentence_boundary(word: str) -> bool:
     return word.endswith((".", "?", "!", "。", "？", "！"))
 
 
+def _has_open_clause_boundary(words: list[str]) -> bool:
+    """A comma signals that right context is already on its way.
+
+    Hard-cutting at the startup word cap after a comma produced fragments such
+    as "please ask Sarah Chen to".  Unpunctuated live speech still uses the
+    latency cap, while an explicitly open clause waits for its completion.
+    """
+    return any(word.endswith((",", ";", ":")) for word in words)
+
+
 @dataclass
 class ConfirmedPhraseAccumulator:
     """Group stable ASR deltas into coherent SimulMT/TTS utterances.
@@ -44,7 +54,9 @@ class ConfirmedPhraseAccumulator:
     bounded for startup; later phrases keep enough context for natural speech.
     """
 
-    first_maximum_words: int = 18
+    # Startup speech must not wait for an entire long sentence. Eight words
+    # still provide a meaningful translation unit while bounding first audio.
+    first_maximum_words: int = 8
     following_minimum_words: int = 8
     following_maximum_words: int = 24
     pending: list[str] = field(default_factory=list)
@@ -64,7 +76,8 @@ class ConfirmedPhraseAccumulator:
             if index + 1 >= minimum and _ends_sentence_boundary(word)
         ), None)
         count = len(self.pending) if final else boundary
-        if count is None and len(self.pending) >= maximum:
+        if (count is None and len(self.pending) >= maximum
+                and not _has_open_clause_boundary(self.pending[:maximum])):
             count = maximum
         if not count:
             return ""
