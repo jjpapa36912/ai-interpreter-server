@@ -26,6 +26,54 @@ def _normalized(word: str) -> str:
     return word.casefold().strip(".,!?;:\"")
 
 
+def _ends_translation_boundary(word: str) -> bool:
+    return word.endswith((",", ";", ":", ".", "?", "!", "。", "？", "！"))
+
+
+@dataclass
+class ConfirmedPhraseAccumulator:
+    """Group stable ASR deltas into coherent SimulMT/TTS utterances.
+
+    Stability and speaking cadence are separate concerns: ASR may confirm a
+    few words at a time, while translating every such delta destroys context
+    and makes TTS sound like unrelated fragments.  The first phrase stays
+    bounded for startup; later phrases keep enough context for natural speech.
+    """
+
+    first_maximum_words: int = 7
+    following_minimum_words: int = 6
+    following_maximum_words: int = 11
+    pending: list[str] = field(default_factory=list)
+    emitted_first: bool = False
+
+    def append(self, delta: str, final: bool = False) -> str:
+        self.pending.extend(_words(delta))
+        if not self.pending:
+            return ""
+        minimum = 3 if not self.emitted_first else self.following_minimum_words
+        maximum = (
+            self.first_maximum_words
+            if not self.emitted_first else self.following_maximum_words
+        )
+        boundary = next((
+            index + 1 for index, word in enumerate(self.pending)
+            if index + 1 >= minimum and _ends_translation_boundary(word)
+        ), None)
+        count = len(self.pending) if final else boundary
+        if count is None and len(self.pending) >= maximum:
+            count = maximum
+        if not count:
+            return ""
+        phrase = " ".join(self.pending[:count])
+        del self.pending[:count]
+        self.emitted_first = True
+        return phrase
+
+    def reset(self) -> None:
+        self.pending.clear()
+        self.emitted_first = False
+
+
 def _uncommitted_tail(committed: list[str], current: list[str]) -> list[str] | None:
     """Align a revised cumulative hypothesis after already-spoken words.
 

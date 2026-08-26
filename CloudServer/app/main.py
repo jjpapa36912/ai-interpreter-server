@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field
 
 from .settings import settings
 from .translation import CUDATranslator
-from .asr import CUDASpeechRecognizer, StreamCommitLedger, StreamingASRSession
+from .asr import (
+    CUDASpeechRecognizer, ConfirmedPhraseAccumulator, StreamCommitLedger,
+    StreamingASRSession,
+)
 from .tts import CUDANeuralTTS
 
 
@@ -201,6 +204,7 @@ async def stream_asr(websocket: WebSocket) -> None:
         return
     session = StreamingASRSession(sample_rate=sample_rate)
     ledger = StreamCommitLedger()
+    phrase_accumulator = ConfirmedPhraseAccumulator()
     translation_session_id = f"ws-{id(websocket)}"
     target_language = "ko" if language == "en" else "en"
 
@@ -212,7 +216,9 @@ async def stream_asr(websocket: WebSocket) -> None:
         )
         session.mark_decoded()
         decision = ledger.apply(session.committer.update(text, final=final))
-        committed_delta = str(decision.get("committed_delta", "")).strip()
+        stable_delta = str(decision.get("committed_delta", "")).strip()
+        committed_delta = phrase_accumulator.append(stable_delta, final=final)
+        decision["committed_delta"] = committed_delta
         translation = None
         translation_latency_ms = None
         if committed_delta:
@@ -257,6 +263,7 @@ async def stream_asr(websocket: WebSocket) -> None:
                 break
             elif command == "reset":
                 session = StreamingASRSession(sample_rate=sample_rate)
+                phrase_accumulator.reset()
                 await websocket.send_json({"type": "reset"})
             else:
                 await websocket.send_json({"type": "error", "error": "unknown message"})

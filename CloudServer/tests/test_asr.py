@@ -1,9 +1,33 @@
 import unittest
 
-from app.asr import StableASRCommitter, StreamCommitLedger, StreamingASRSession
+from app.asr import (
+    ConfirmedPhraseAccumulator, StableASRCommitter, StreamCommitLedger,
+    StreamingASRSession,
+)
 
 
 class StableASRCommitterTests(unittest.TestCase):
+    def test_confirmed_phrase_accumulator_keeps_later_speech_connected(self):
+        phrases = ConfirmedPhraseAccumulator()
+        self.assertEqual(phrases.append("Before Friday's interview,"),
+                         "Before Friday's interview,")
+        self.assertEqual(phrases.append("please ask Sarah"), "")
+        self.assertEqual(phrases.append("Chen to confirm"), "")
+        self.assertEqual(
+            phrases.append("whether the revised launch budget"),
+            "please ask Sarah Chen to confirm whether the revised launch budget",
+        )
+
+    def test_confirmed_phrase_accumulator_bounds_unpunctuated_first_phrase(self):
+        phrases = ConfirmedPhraseAccumulator(first_maximum_words=7)
+        self.assertEqual(phrases.append("하나 둘 셋"), "")
+        self.assertEqual(phrases.append("넷 다섯 여섯 일곱"),
+                         "하나 둘 셋 넷 다섯 여섯 일곱")
+
+    def test_confirmed_phrase_accumulator_flushes_final_remainder(self):
+        phrases = ConfirmedPhraseAccumulator()
+        self.assertEqual(phrases.append("short final phrase", final=True),
+                         "short final phrase")
     def test_committer_emits_only_new_stable_words(self):
         committer = StableASRCommitter(
             lookahead_words=2, agreement_decodes=2, minimum_commit_words=1
