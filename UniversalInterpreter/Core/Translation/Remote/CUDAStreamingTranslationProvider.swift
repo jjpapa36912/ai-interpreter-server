@@ -144,6 +144,9 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private var pendingError: Error?
     private var inlinePlaybackGroupID: UUID?
     private var inlineSampleRate = CosyVoiceStreamingClient.sampleRate
+    private var debugSessionID = UUID()
+    private var forwardedAudioMilliseconds: Double = 0
+    private var receivedFirstInlinePCM = false
 
     init(
         configuration: CUDAStreamingServerConfiguration,
@@ -183,6 +186,9 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         self.sourceLanguage = sourceLanguage
         self.targetLanguage = targetLanguage
         sessionStartedAt = .now
+        debugSessionID = UUID()
+        forwardedAudioMilliseconds = 0
+        receivedFirstInlinePCM = false
         metrics = AudioPipelineMetrics()
         pendingError = nil
         // G-Cube exposes this workload through a single public connection slot.
@@ -192,12 +198,14 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         // speech without extending translated playback latency.
         pipeline = AudioChunkPipeline(maximumBufferedChunks: 100)
         silenceGate.reset()
+        await recordDebug(event: "gpu_session_started")
 
         let (connectedSession, webSocket) = try await connectSocket(
             sourceLanguage: sourceLanguage
         )
         socketSession = connectedSession
         socket = webSocket
+        await recordDebug(event: "gpu_websocket_connected")
 
         let translations = AsyncStream<QueuedSource>.makeStream()
         translationContinuation = translations.continuation
@@ -239,6 +247,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         // prefix can hallucinate short polite phrases (for example "감사해요")
         // which would otherwise be committed and spoken before media starts.
         guard silenceGate.shouldForward(chunk) else { return }
+        forwardedAudioMilliseconds +=
+            Double(chunk.samples.count) / chunk.format.sampleRate * 1_000
         await pipeline.ingest(chunk)
     }
 
@@ -423,6 +433,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                         ),
                         capturedAt: .now, playbackGroupID: groupID
                     )
+                    if !receivedFirstInlinePCM {
+                        receivedFirstInlinePCM = true
+                        await recordDebug(event: "gpu_tts_first_pcm")
+                    }
                     _ = outputContinuation.yield(chunk)
                     continue
                 case let .string(value): data = Data(value.utf8)
@@ -431,13 +445,16 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                 let decoded = try JSONDecoder().decode(ASRMessage.self, from: data)
                 if decoded.type == "tts_start" {
                     inlinePlaybackGroupID = UUID()
+                    receivedFirstInlinePCM = false
                     inlineSampleRate = decoded.sampleRate
                         ?? CosyVoiceStreamingClient.sampleRate
+                    await recordDebug(event: "gpu_tts_start")
                     continue
                 }
                 if decoded.type == "tts_end" {
                     inlinePlaybackGroupID = nil
                     metrics.outputChunks += 1
+                    await recordDebug(event: "gpu_tts_end")
                     continue
                 }
                 if decoded.type == "tts_error" {
@@ -454,6 +471,10 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                        let sessionStartedAt {
                         metrics.firstHypothesisMilliseconds = sessionStartedAt.duration(to: .now).milliseconds
                     }
+                    await recordDebug(
+                        event: "gpu_asr_hypothesis", source: hypothesis,
+                        operationMilliseconds: decoded.latencyMilliseconds
+                    )
                 }
                 let delta = decoded.committedDelta?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -475,6 +496,11 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
                             metrics.firstStableTranslationMilliseconds =
                                 sessionStartedAt.duration(to: .now).milliseconds
                         }
+                        await recordDebug(
+                            event: "gpu_translation_confirmed", source: delta,
+                            translation: translation,
+                            operationMilliseconds: decoded.translationMilliseconds
+                        )
                     } else {
                         translationContinuation?.yield(QueuedSource(
                             text: delta,
@@ -490,8 +516,22 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             return
         } catch {
             if isReleasingSocketForVoice { return }
+            await recordDebug(event: "gpu_error", status: error.localizedDescription)
             recordFailure(error)
         }
+    }
+
+    private func recordDebug(
+        event: String, source: String? = nil, translation: String? = nil,
+        status: String? = nil, operationMilliseconds: Double? = nil
+    ) async {
+        await SimultaneousDebugLogger.shared.record(
+            sessionID: debugSessionID, event: event,
+            audioMilliseconds: forwardedAudioMilliseconds,
+            sourceLanguage: sourceLanguage, targetLanguage: targetLanguage,
+            source: source, translation: translation, status: status,
+            operationMilliseconds: operationMilliseconds
+        )
     }
 
     private func translateAndSynthesize(_ request: QueuedSource) async {

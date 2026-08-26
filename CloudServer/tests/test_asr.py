@@ -11,11 +11,15 @@ class StableASRCommitterTests(unittest.TestCase):
         phrases = ConfirmedPhraseAccumulator()
         self.assertEqual(phrases.append("Before Friday's interview,"), "")
         self.assertEqual(phrases.append("please ask Sarah"), "")
-        self.assertEqual(phrases.append("Chen to confirm"), "")
+        self.assertEqual(
+            phrases.append("Chen to confirm"),
+            "Before Friday's interview, please ask Sarah Chen to confirm",
+        )
         self.assertEqual(phrases.append("whether the revised launch budget"), "")
-        self.assertEqual(phrases.append("is final."),
-                         "Before Friday's interview, please ask Sarah Chen to confirm "
-                         "whether the revised launch budget is final.")
+        self.assertEqual(
+            phrases.append("is final."),
+            "whether the revised launch budget is final.",
+        )
 
     def test_confirmed_phrase_accumulator_bounds_unpunctuated_first_phrase(self):
         phrases = ConfirmedPhraseAccumulator()

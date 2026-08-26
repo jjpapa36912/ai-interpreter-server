@@ -39,7 +39,23 @@ cd "${project_root}"
 pkill -TERM -x UniversalInterpreter 2>/dev/null || true
 APP_SIGNING_IDENTITY="${signing_identity}" ./scripts/build-app.sh
 if [[ "${OPEN_APP:-1}" == "1" ]]; then
-    if [[ "${DISABLE_GPU_TRANSLATION:-1}" == "1" ]]; then
+    if [[ "${HYBRID_GPU_TTS:-0}" == "1" ]]; then
+        if [[ -z "${AI_INTERPRETER_STREAMING_SERVER_URL:-}" ]]; then
+            print -u2 "AI_INTERPRETER_STREAMING_SERVER_URL이 설정되지 않았습니다."
+            exit 1
+        fi
+        # Proven local ASR/translation plus GPU neural voice. This avoids the
+        # slower GPU translation model and G-Cube's unreliable HTTP streaming;
+        # CosyVoiceStreamingClient uses the dedicated TTS WebSocket endpoint.
+        open --env AI_INTERPRETER_DISABLE_REMOTE_TRANSLATION=1 \
+            --env AI_INTERPRETER_DISABLE_GPU_STREAMING=1 \
+            --env AI_INTERPRETER_SIMULTANEOUS_TTS=0 \
+            --env AI_INTERPRETER_TTS_SERVER_URL="${AI_INTERPRETER_TTS_SERVER_URL:-${AI_INTERPRETER_STREAMING_SERVER_URL}}" \
+            --env AI_INTERPRETER_TTS_SERVER_TOKEN="${AI_INTERPRETER_TTS_SERVER_TOKEN:-${AI_INTERPRETER_STREAMING_SERVER_TOKEN:-}}" \
+            --env AI_INTERPRETER_NEMOTRON_MODEL="${nemotron_model}" \
+            "${project_root}/outputs/AI Interpreter.app"
+        print "AI Interpreter를 로컬 번역 + GPU WebSocket 음성으로 실행했습니다."
+    elif [[ "${DISABLE_GPU_TRANSLATION:-1}" == "1" ]]; then
         # Force a genuinely local process even when launchctl still contains a
         # streaming-server URL from an earlier GPU test.  Previously only the
         # legacy HTTP translator was disabled, so the app silently selected

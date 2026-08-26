@@ -46,6 +46,13 @@ class TTSRequest(BaseModel):
     voice_id: str | None = None
 
 
+def next_tts_chunk(iterator):
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
+
+
 @lru_cache(maxsize=1)
 def translator() -> CUDATranslator:
     return CUDATranslator(settings)
@@ -143,6 +150,46 @@ def synthesize_speech(request: TTSRequest) -> StreamingResponse:
     )
 
 
+@app.websocket("/v1/tts/ws")
+async def stream_speech(websocket: WebSocket) -> None:
+    """Stream neural speech without G-Cube's unreliable HTTP upstream."""
+    if not websocket_authorized(websocket):
+        await websocket.close(code=4401, reason="invalid bearer token")
+        return
+    ensure_preload_started()
+    if _preload_error:
+        await websocket.close(code=1011, reason="model preload failed")
+        return
+    if not neural_tts().loaded:
+        await websocket.close(code=1013, reason="TTS model is still loading")
+        return
+    await websocket.accept()
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            try:
+                request = TTSRequest.model_validate(payload)
+            except Exception as error:
+                await websocket.send_json({"type": "tts_error", "error": str(error)})
+                continue
+            await websocket.send_json({"type": "tts_start", "sample_rate": 24_000})
+            try:
+                iterator = neural_tts().synthesize_stream(
+                    request.text, request.language, request.voice_id
+                )
+                while True:
+                    generated = await asyncio.to_thread(next_tts_chunk, iterator)
+                    if generated is None:
+                        break
+                    pcm, _sample_rate = generated
+                    await websocket.send_bytes(pcm)
+                await websocket.send_json({"type": "tts_end"})
+            except Exception as error:
+                await websocket.send_json({"type": "tts_error", "error": str(error)})
+    except WebSocketDisconnect:
+        pass
+
+
 @app.post(
     "/v1/translate", response_model=TranslationResponse,
     dependencies=[Depends(authorize)],
@@ -219,12 +266,6 @@ async def stream_asr(websocket: WebSocket) -> None:
     async def send_bytes(payload: bytes) -> None:
         async with send_lock:
             await websocket.send_bytes(payload)
-
-    def next_tts_chunk(iterator):
-        try:
-            return next(iterator)
-        except StopIteration:
-            return None
 
     async def stream_translated_speech() -> None:
         while True:

@@ -4,6 +4,8 @@ enum CosyVoiceStreamingError: LocalizedError {
     case invalidEndpoint
     case invalidResponse(Int)
     case emptyAudio
+    case invalidMessage
+    case server(String)
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,10 @@ enum CosyVoiceStreamingError: LocalizedError {
             "GPU 음성 서버가 HTTP \(status) 오류를 반환했습니다."
         case .emptyAudio:
             "GPU 음성 서버가 음성을 반환하지 않았습니다."
+        case .invalidMessage:
+            "GPU 음성 서버 응답 형식이 올바르지 않습니다."
+        case let .server(message):
+            "GPU 음성 서버 오류: \(message)"
         }
     }
 }
@@ -29,6 +35,17 @@ final class CosyVoiceStreamingClient: @unchecked Sendable {
         enum CodingKeys: String, CodingKey {
             case text, language
             case voiceID = "voice_id"
+        }
+    }
+
+    private struct StreamMessage: Decodable {
+        let type: String
+        let sampleRate: Double?
+        let error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case type, error
+            case sampleRate = "sample_rate"
         }
     }
 
@@ -69,6 +86,92 @@ final class CosyVoiceStreamingClient: @unchecked Sendable {
     }
 
     func synthesize(
+        text: String,
+        language: Language,
+        voiceID: String? = nil,
+        onChunk: @Sendable (AudioChunk) -> Void
+    ) async throws {
+        try await synthesizeWebSocket(
+            text: text, language: language, voiceID: voiceID, onChunk: onChunk
+        )
+    }
+
+    func webSocketURL() throws -> URL {
+        var components = URLComponents(
+            url: endpoint.appending(path: "v1/tts/ws"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.scheme = endpoint.scheme == "https" ? "wss" : "ws"
+        var queryItems = [URLQueryItem(name: "connection_id", value: UUID().uuidString)]
+        if let authorization, !authorization.isEmpty {
+            queryItems.append(URLQueryItem(name: "token", value: authorization))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw CosyVoiceStreamingError.invalidEndpoint
+        }
+        return url
+    }
+
+    private func synthesizeWebSocket(
+        text: String,
+        language: Language,
+        voiceID: String?,
+        onChunk: @Sendable (AudioChunk) -> Void
+    ) async throws {
+        let socketSession = URLSession(configuration: .ephemeral)
+        let socket = socketSession.webSocketTask(with: try webSocketURL())
+        socket.resume()
+        defer {
+            socket.cancel(with: .normalClosure, reason: nil)
+            socketSession.invalidateAndCancel()
+        }
+        let body = try JSONEncoder().encode(RequestBody(
+            text: text, language: language.rawValue, voiceID: voiceID
+        ))
+        guard let request = String(data: body, encoding: .utf8) else {
+            throw CosyVoiceStreamingError.invalidMessage
+        }
+        try await socket.send(.string(request))
+
+        let playbackGroupID = UUID()
+        var sampleRate = Self.sampleRate
+        var emitted = false
+        while true {
+            let message = try await socket.receive()
+            switch message {
+            case let .data(data):
+                guard data.count.isMultiple(of: MemoryLayout<Int16>.size) else {
+                    throw CosyVoiceStreamingError.invalidMessage
+                }
+                onChunk(AudioChunk(
+                    samples: Self.decodePCM16(data),
+                    format: AudioFormatInfo(
+                        sampleRate: sampleRate, channelCount: 1, bitsPerChannel: 16
+                    ),
+                    capturedAt: .now,
+                    playbackGroupID: playbackGroupID
+                ))
+                emitted = true
+            case let .string(value):
+                let decoded = try JSONDecoder().decode(
+                    StreamMessage.self, from: Data(value.utf8)
+                )
+                if decoded.type == "tts_start" {
+                    sampleRate = decoded.sampleRate ?? Self.sampleRate
+                } else if decoded.type == "tts_end" {
+                    guard emitted else { throw CosyVoiceStreamingError.emptyAudio }
+                    return
+                } else if decoded.type == "tts_error" {
+                    throw CosyVoiceStreamingError.server(decoded.error ?? "unknown")
+                }
+            @unknown default:
+                throw CosyVoiceStreamingError.invalidMessage
+            }
+        }
+    }
+
+    private func synthesizeHTTP(
         text: String,
         language: Language,
         voiceID: String? = nil,

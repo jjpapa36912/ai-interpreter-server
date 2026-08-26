@@ -43,3 +43,16 @@ import Testing
     let client = CosyVoiceStreamingClient.configured(from: configuration)
     #expect(client.endpoint.absoluteString == "https://voice.example.test")
 }
+
+@Test func cosyVoiceBuildsAuthenticatedWebSocketURL() throws {
+    let client = try #require(CosyVoiceStreamingClient.configured(environment: [
+        "AI_INTERPRETER_TTS_SERVER_URL": "https://voice.example.test/base",
+        "AI_INTERPRETER_TTS_SERVER_TOKEN": "secret token",
+    ]))
+    let components = try #require(URLComponents(
+        url: client.webSocketURL(), resolvingAgainstBaseURL: false
+    ))
+    #expect(components.scheme == "wss")
+    #expect(components.path == "/base/v1/tts/ws")
+    #expect(components.queryItems?.first(where: { $0.name == "token" })?.value == "secret token")
+}

@@ -34,14 +34,13 @@ def _ends_sentence_boundary(word: str) -> bool:
     return word.endswith((".", "?", "!", "。", "？", "！"))
 
 
-def _has_open_clause_boundary(words: list[str]) -> bool:
-    """A comma signals that right context is already on its way.
-
-    Hard-cutting at the startup word cap after a comma produced fragments such
-    as "please ask Sarah Chen to".  Unpunctuated live speech still uses the
-    latency cap, while an explicitly open clause waits for its completion.
-    """
-    return any(word.endswith((",", ";", ":")) for word in words)
+def _is_open_ending(word: str) -> bool:
+    """Words that make an arbitrary hard cut sound obviously unfinished."""
+    return _normalized(word) in {
+        "a", "an", "the", "and", "or", "but", "to", "of", "for", "with",
+        "from", "by", "at", "in", "on", "that", "which", "who", "because",
+        "if", "when", "while", "as",
+    }
 
 
 @dataclass
@@ -57,7 +56,7 @@ class ConfirmedPhraseAccumulator:
     # Startup speech must not wait for an entire long sentence. Eight words
     # still provide a meaningful translation unit while bounding first audio.
     first_maximum_words: int = 8
-    following_minimum_words: int = 8
+    following_minimum_words: int = 6
     following_maximum_words: int = 24
     pending: list[str] = field(default_factory=list)
     emitted_first: bool = False
@@ -76,9 +75,18 @@ class ConfirmedPhraseAccumulator:
             if index + 1 >= minimum and _ends_sentence_boundary(word)
         ), None)
         count = len(self.pending) if final else boundary
-        if (count is None and len(self.pending) >= maximum
-                and not _has_open_clause_boundary(self.pending[:maximum])):
+        if count is None and len(self.pending) >= maximum:
             count = maximum
+            if not self.emitted_first and _is_open_ending(self.pending[count - 1]):
+                # Extend by only the few words required to close an obviously
+                # unfinished startup fragment ("ask Sarah Chen to ...").
+                # The previous comma rule could wait without a bound; this
+                # extension is capped and therefore cannot recreate that lag.
+                limit = min(len(self.pending), maximum + 4)
+                count = next((
+                    index + 1 for index in range(maximum, limit)
+                    if not _is_open_ending(self.pending[index])
+                ), None)
         if not count:
             return ""
         phrase = " ".join(self.pending[:count])
