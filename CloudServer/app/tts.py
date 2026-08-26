@@ -31,18 +31,19 @@ class CUDANeuralTTS:
                 FasterQwen3TTS = None
             from qwen_tts import Qwen3TTSModel
 
-            kwargs = {
-                "device_map": "cuda:0",
-                "dtype": torch.bfloat16,
-            }
             if FasterQwen3TTS is not None:
                 self.model = FasterQwen3TTS.from_pretrained(
                     self.settings.tts_model,
+                    device="cuda",
+                    dtype=torch.bfloat16,
                     attn_implementation="sdpa",
-                    **kwargs,
                 )
                 self.streaming_available = True
             else:
+                kwargs = {
+                    "device_map": "cuda:0",
+                    "dtype": torch.bfloat16,
+                }
                 try:
                     self.model = Qwen3TTSModel.from_pretrained(
                         self.settings.tts_model,
