@@ -1,3 +1,7 @@
+# Reuse the already-published model cache. Updating application code or the TTS
+# runtime must not download the multi-GB model snapshots again on every build.
+FROM ghcr.io/jjpapa36912/ai-interpreter-server:prototype AS cached-models
+
 # NVIDIA NGC avoids the Docker Hub pull path that failed on gcube and includes
 # a Blackwell-compatible CUDA/PyTorch runtime for the RTX 5090.
 FROM nvcr.io/nvidia/pytorch:25.08-py3
@@ -15,6 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AI_INTERPRETER_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 
 WORKDIR /srv/ai-interpreter
+COPY --from=cached-models /models/huggingface /models/huggingface
 COPY CloudServer/requirements.txt ./requirements.txt
 COPY CloudServer/scripts/patch_qwen_tts_12hz.py ./scripts/patch_qwen_tts_12hz.py
 RUN python -m pip install --no-cache-dir -r requirements.txt

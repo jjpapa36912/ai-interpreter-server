@@ -8,11 +8,11 @@ enum CosyVoiceStreamingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
-            "CosyVoice 스트리밍 서버 주소가 올바르지 않습니다."
+            "GPU 음성 서버 주소가 올바르지 않습니다."
         case let .invalidResponse(status):
-            "CosyVoice 서버가 HTTP \(status) 오류를 반환했습니다."
+            "GPU 음성 서버가 HTTP \(status) 오류를 반환했습니다."
         case .emptyAudio:
-            "CosyVoice 서버가 음성을 반환하지 않았습니다."
+            "GPU 음성 서버가 음성을 반환하지 않았습니다."
         }
     }
 }
@@ -62,8 +62,8 @@ final class CosyVoiceStreamingClient: @unchecked Sendable {
         session: URLSession = .shared
     ) -> CosyVoiceStreamingClient {
         CosyVoiceStreamingClient(
-            endpoint: configuration.endpoint,
-            authorization: configuration.authorization,
+            endpoint: configuration.voiceEndpoint,
+            authorization: configuration.voiceAuthorization,
             session: session
         )
     }
@@ -74,25 +74,46 @@ final class CosyVoiceStreamingClient: @unchecked Sendable {
         voiceID: String? = nil,
         onChunk: @Sendable (AudioChunk) -> Void
     ) async throws {
-        var request = URLRequest(url: endpoint.appending(path: "v1/tts/stream"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/L16;rate=24000;channels=1", forHTTPHeaderField: "Accept")
-        if let authorization {
-            request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
-        }
-        request.httpBody = try JSONEncoder().encode(RequestBody(
+        let body = try JSONEncoder().encode(RequestBody(
             text: text, language: language.rawValue, voiceID: voiceID
         ))
+        var bytes: URLSession.AsyncBytes?
+        var successfulRetrySession: URLSession?
+        var lastStatus = -1
+        let retryDelays = [50, 75, 100, 150, 225, 350, 500]
+        for attempt in 0...retryDelays.count {
+            var request = URLRequest(url: endpoint.appending(path: "v1/tts/stream"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("audio/L16;rate=24000;channels=1", forHTTPHeaderField: "Accept")
+            if let authorization {
+                request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = body
 
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw CosyVoiceStreamingError.invalidResponse(-1)
+            // A 503 from G-Cube can poison the keep-alive connection. Reusing
+            // that connection made every retry hit the same dead upstream.
+            let requestSession = URLSession(configuration: .ephemeral)
+            let result = try await requestSession.bytes(for: request)
+            guard let http = result.1 as? HTTPURLResponse else {
+                requestSession.invalidateAndCancel()
+                throw CosyVoiceStreamingError.invalidResponse(-1)
+            }
+            lastStatus = http.statusCode
+            if (200..<300).contains(http.statusCode) {
+                bytes = result.0
+                successfulRetrySession = requestSession
+                break
+            }
+            requestSession.invalidateAndCancel()
+            guard [502, 503, 504].contains(http.statusCode), attempt < retryDelays.count else {
+                throw CosyVoiceStreamingError.invalidResponse(http.statusCode)
+            }
+            try await Task.sleep(for: .milliseconds(retryDelays[attempt]))
         }
-        guard (200..<300).contains(http.statusCode) else {
-            throw CosyVoiceStreamingError.invalidResponse(http.statusCode)
-        }
+        guard let bytes else { throw CosyVoiceStreamingError.invalidResponse(lastStatus) }
+        defer { successfulRetrySession?.finishTasksAndInvalidate() }
 
         let targetBytes = Self.framesPerChunk * MemoryLayout<Int16>.size
         var pending = Data()

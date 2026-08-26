@@ -15,6 +15,18 @@ health, readiness, streaming ASR, translation, and context-reset endpoints.
 - Istio proxy: enabled
 - Replica count: `1`
 
+Create two HTTP services on the same workload, both targeting container port
+`8000`: one public URL for ASR/translation and a second public URL for TTS.
+Set the client variables independently:
+
+```bash
+AI_INTERPRETER_STREAMING_SERVER_URL=https://ASR-SERVICE
+AI_INTERPRETER_TTS_SERVER_URL=https://TTS-SERVICE
+```
+
+The separate ingress routes keep the long-lived ASR WebSocket from blocking
+the streaming TTS response. They do not require a second GPU or replica.
+
 Set `AI_INTERPRETER_SERVER_TOKEN` to a long random value in the workload
 environment. Do not put it in the image or source tree.
 

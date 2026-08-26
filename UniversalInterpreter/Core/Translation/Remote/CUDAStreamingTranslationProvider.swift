@@ -23,6 +23,8 @@ enum CUDAStreamingProviderError: LocalizedError {
 struct CUDAStreamingServerConfiguration: Sendable, Equatable {
     let endpoint: URL
     let authorization: String?
+    let voiceEndpoint: URL
+    let voiceAuthorization: String?
 
     static func configured(
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -32,10 +34,25 @@ struct CUDAStreamingServerConfiguration: Sendable, Equatable {
               let endpoint = URL(string: raw),
               ["http", "https"].contains(endpoint.scheme?.lowercased() ?? "")
         else { return nil }
+        let voiceEndpoint: URL
+        if let rawVoice = environment["AI_INTERPRETER_TTS_SERVER_URL"],
+           let configuredVoice = URL(string: rawVoice),
+           ["http", "https"].contains(configuredVoice.scheme?.lowercased() ?? "") {
+            voiceEndpoint = configuredVoice
+        } else {
+            voiceEndpoint = endpoint
+        }
         return CUDAStreamingServerConfiguration(
             endpoint: endpoint,
-            authorization: environment["AI_INTERPRETER_STREAMING_SERVER_TOKEN"]
+            authorization: environment["AI_INTERPRETER_STREAMING_SERVER_TOKEN"],
+            voiceEndpoint: voiceEndpoint,
+            voiceAuthorization: environment["AI_INTERPRETER_TTS_SERVER_TOKEN"]
+                ?? environment["AI_INTERPRETER_STREAMING_SERVER_TOKEN"]
         )
+    }
+
+    var requiresVoicePortHandoff: Bool {
+        endpoint.absoluteURL.standardized == voiceEndpoint.absoluteURL.standardized
     }
 
     func webSocketURL(sourceLanguage: Language) throws -> URL {
@@ -107,6 +124,8 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     private let translationClient: CUDATranslationClient
     private let neuralTTS: CosyVoiceStreamingClient
     private let outputContinuation: AsyncStream<AudioChunk>.Continuation
+    private var socketSession: URLSession?
+    private var isReleasingSocketForVoice = false
     private var sourceLanguage: Language?
     private var targetLanguage: Language?
     private var socket: URLSessionWebSocketTask?
@@ -160,13 +179,19 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         sessionStartedAt = .now
         metrics = AudioPipelineMetrics()
         pendingError = nil
-        pipeline = AudioChunkPipeline()
+        // G-Cube exposes this workload through a single public connection slot.
+        // While that slot is briefly handed from ASR WebSocket to HTTP TTS,
+        // retain enough source audio to replay it after reconnecting. This is
+        // input audio, not a TTS backlog, so preserving it prevents skipped
+        // speech without extending translated playback latency.
+        pipeline = AudioChunkPipeline(maximumBufferedChunks: 100)
         silenceGate.reset()
 
-        let request = URLRequest(url: try configuration.webSocketURL(sourceLanguage: sourceLanguage))
-        let webSocket = session.webSocketTask(with: request)
+        let (connectedSession, webSocket) = try await connectSocket(
+            sourceLanguage: sourceLanguage
+        )
+        socketSession = connectedSession
         socket = webSocket
-        webSocket.resume()
 
         let translations = AsyncStream<QueuedSource>.makeStream()
         translationContinuation = translations.continuation
@@ -193,7 +218,12 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     }
 
     func sendAudio(_ chunk: AudioChunk) async throws {
-        guard socket != nil else { throw TranslationProviderError.notConnected }
+        // During the deliberate ASR -> TTS port handoff there is briefly no
+        // socket. Accept and buffer source audio instead of reporting a broken
+        // session to AppState (which would stop capture and cancel TTS).
+        guard socket != nil || isReleasingSocketForVoice else {
+            throw TranslationProviderError.notConnected
+        }
         if let pendingError {
             self.pendingError = nil
             throw pendingError
@@ -220,6 +250,9 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             socket.cancel(with: .normalClosure, reason: nil)
         }
         socket = nil
+        socketSession?.invalidateAndCancel()
+        socketSession = nil
+        isReleasingSocketForVoice = false
         receiveTask?.cancel()
         translationTask?.cancel()
         pipelineTask?.cancel()
@@ -232,6 +265,66 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         sourceLanguage = nil
         targetLanguage = nil
         sessionStartedAt = nil
+    }
+
+    private func connectSocket(
+        sourceLanguage: Language
+    ) async throws -> (URLSession, URLSessionWebSocketTask) {
+        var lastError: Error = URLError(.cannotConnectToHost)
+        let delays = [50, 75, 100, 150, 225, 350, 500]
+        for attempt in 0...delays.count {
+            var components = URLComponents(
+                url: try configuration.webSocketURL(sourceLanguage: sourceLanguage),
+                resolvingAgainstBaseURL: false
+            )
+            var queryItems = components?.queryItems ?? []
+            queryItems.append(URLQueryItem(
+                name: "connection_attempt",
+                value: "\(attempt)-\(UUID().uuidString)"
+            ))
+            components?.queryItems = queryItems
+            guard let url = components?.url else {
+                throw CUDAStreamingProviderError.invalidEndpoint
+            }
+
+            let candidateSession = URLSession(configuration: .ephemeral)
+            let candidate = candidateSession.webSocketTask(with: URLRequest(url: url))
+            candidate.resume()
+            do {
+                try await candidate.send(.string("reset"))
+                let reply = try await withThrowingTaskGroup(
+                    of: URLSessionWebSocketTask.Message.self
+                ) { group in
+                    group.addTask { try await candidate.receive() }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(4))
+                        throw URLError(.timedOut)
+                    }
+                    let value = try await group.next()!
+                    group.cancelAll()
+                    return value
+                }
+                let data: Data
+                switch reply {
+                case let .data(value): data = value
+                case let .string(value): data = Data(value.utf8)
+                @unknown default: throw CUDAStreamingProviderError.invalidMessage
+                }
+                let ack = try JSONDecoder().decode(ASRMessage.self, from: data)
+                guard ack.type == "reset" else {
+                    throw CUDAStreamingProviderError.invalidMessage
+                }
+                return (candidateSession, candidate)
+            } catch {
+                lastError = error
+                candidate.cancel(with: .goingAway, reason: nil)
+                candidateSession.invalidateAndCancel()
+            }
+            if attempt < delays.count {
+                try await Task.sleep(for: .milliseconds(delays[attempt]))
+            }
+        }
+        throw lastError
     }
 
     private func requireReady() async throws {
@@ -266,8 +359,41 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
     }
 
     private func sendPCM(_ data: Data) async throws {
-        guard let socket else { throw TranslationProviderError.notConnected }
-        try await socket.send(.data(data))
+        // A translated phrase temporarily releases G-Cube's only public
+        // connection so the TTS HTTP request can reach the same workload.
+        // Wait here instead of failing the pipeline; AudioChunkPipeline keeps
+        // the source PCM bounded while the socket is being restored.
+        for _ in 0..<160 {
+            if let socket {
+                try await socket.send(.data(data))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw TranslationProviderError.notConnected
+    }
+
+    private func releaseSocketForVoice() {
+        isReleasingSocketForVoice = true
+        receiveTask?.cancel()
+        receiveTask = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        socketSession?.invalidateAndCancel()
+        socketSession = nil
+    }
+
+    private func restoreSocketAfterVoice() async throws {
+        guard socket == nil, let sourceLanguage else { return }
+        let (connectedSession, webSocket) = try await connectSocket(
+            sourceLanguage: sourceLanguage
+        )
+        socketSession = connectedSession
+        socket = webSocket
+        isReleasingSocketForVoice = false
+        receiveTask = Task { [weak self] in
+            await self?.receiveMessages()
+        }
     }
 
     private func receiveMessages() async {
@@ -313,6 +439,7 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
         } catch is CancellationError {
             return
         } catch {
+            if isReleasingSocketForVoice { return }
             recordFailure(error)
         }
     }
@@ -370,24 +497,65 @@ actor CUDAStreamingTranslationProvider: TranslationProvider {
             let synthesisStarted = ContinuousClock.now
             let groupID = UUID()
             let continuation = outputContinuation
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { [neuralTTS] in
-                    try await neuralTTS.synthesize(
-                        text: response.text,
-                        language: targetLanguage
-                    ) { chunk in
-                        switch continuation.yield(chunk.groupedForPlayback(groupID)) {
-                        case .enqueued, .dropped, .terminated: break
-                        @unknown default: break
+            // Legacy one-service deployments need a short transport handoff.
+            // Production uses a dedicated TTS service URL, allowing ASR and
+            // true-streaming voice generation to run concurrently.
+            if configuration.requiresVoicePortHandoff {
+                releaseSocketForVoice()
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+            do {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { [neuralTTS] in
+                        try await neuralTTS.synthesize(
+                            text: response.text,
+                            language: targetLanguage
+                        ) { chunk in
+                            switch continuation.yield(chunk.groupedForPlayback(groupID)) {
+                            case .enqueued, .dropped, .terminated: break
+                            @unknown default: break
+                            }
                         }
                     }
+                    group.addTask {
+                        try await Task.sleep(for: TTSQueuePolicy.synthesisWatchdogTimeout)
+                        throw URLError(.timedOut)
+                    }
+                    try await group.next()
+                    group.cancelAll()
                 }
-                group.addTask {
-                    try await Task.sleep(for: TTSQueuePolicy.synthesisWatchdogTimeout)
-                    throw URLError(.timedOut)
+            } catch is CancellationError {
+                if configuration.requiresVoicePortHandoff {
+                    do {
+                        try await restoreSocketAfterVoice()
+                    } catch {
+                        isReleasingSocketForVoice = false
+                        recordFailure(error)
+                    }
                 }
-                try await group.next()
-                group.cancelAll()
+                return
+            } catch {
+                // A transient voice-service outage must never terminate ASR
+                // or translation. Drop only this stale utterance; the next
+                // confirmed phrase makes a fresh synthesis request.
+                metrics.droppedChunks += 1
+                if configuration.requiresVoicePortHandoff {
+                    do {
+                        try await restoreSocketAfterVoice()
+                    } catch {
+                        isReleasingSocketForVoice = false
+                        recordFailure(error)
+                    }
+                }
+                return
+            }
+            if configuration.requiresVoicePortHandoff {
+                do {
+                    try await restoreSocketAfterVoice()
+                } catch {
+                    recordFailure(error)
+                    return
+                }
             }
             metrics.synthesisMilliseconds = synthesisStarted.duration(to: .now).milliseconds
             metrics.outputChunks += 1

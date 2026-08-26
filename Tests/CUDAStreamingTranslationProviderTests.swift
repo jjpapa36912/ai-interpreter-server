@@ -32,4 +32,18 @@ struct CUDAStreamingTranslationProviderTests {
         #expect(url.query?.contains("sample_rate=16000") == true)
         #expect(url.query?.contains("token=secret") == true)
     }
+
+    @Test func configuresIndependentVoiceService() throws {
+        let configuration = try #require(
+            CUDAStreamingServerConfiguration.configured(environment: [
+                "AI_INTERPRETER_STREAMING_SERVER_URL": "https://asr.example.test",
+                "AI_INTERPRETER_STREAMING_SERVER_TOKEN": "asr-secret",
+                "AI_INTERPRETER_TTS_SERVER_URL": "https://voice.example.test",
+                "AI_INTERPRETER_TTS_SERVER_TOKEN": "voice-secret",
+            ])
+        )
+        #expect(configuration.voiceEndpoint.absoluteString == "https://voice.example.test")
+        #expect(configuration.voiceAuthorization == "voice-secret")
+        #expect(configuration.requiresVoicePortHandoff == false)
+    }
 }

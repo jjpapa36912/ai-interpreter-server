@@ -126,23 +126,17 @@ def ready() -> dict[str, object]:
 
 @app.post("/v1/tts/stream", dependencies=[Depends(authorize)])
 def synthesize_speech(request: TTSRequest) -> StreamingResponse:
-    try:
-        pcm, sample_rate = neural_tts().synthesize(
-            request.text, request.language, request.voice_id
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-    chunk_bytes = max(2, int(sample_rate * 0.08) * 2)
-
     def chunks():
-        for offset in range(0, len(pcm), chunk_bytes):
-            yield pcm[offset:offset + chunk_bytes]
+        yield from (
+            pcm for pcm, _sample_rate in neural_tts().synthesize_stream(
+                request.text, request.language, request.voice_id
+            )
+        )
 
     return StreamingResponse(
         chunks(),
-        media_type=f"audio/L16;rate={sample_rate};channels=1",
-        headers={"X-Audio-Sample-Rate": str(sample_rate)},
+        media_type="audio/L16;rate=24000;channels=1",
+        headers={"X-Audio-Sample-Rate": "24000"},
     )
 
 

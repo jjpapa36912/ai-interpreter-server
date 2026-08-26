@@ -32,3 +32,14 @@ import Testing
     let client = CosyVoiceStreamingClient.configured(from: configuration)
     #expect(client.endpoint.absoluteString == "https://gpu.example.test/base")
 }
+
+@Test func cosyVoiceUsesDedicatedCUDAServiceWhenConfigured() throws {
+    let configuration = try #require(
+        CUDAStreamingServerConfiguration.configured(environment: [
+            "AI_INTERPRETER_STREAMING_SERVER_URL": "https://asr.example.test",
+            "AI_INTERPRETER_TTS_SERVER_URL": "https://voice.example.test",
+        ])
+    )
+    let client = CosyVoiceStreamingClient.configured(from: configuration)
+    #expect(client.endpoint.absoluteString == "https://voice.example.test")
+}
