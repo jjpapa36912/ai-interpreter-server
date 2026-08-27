@@ -21,6 +21,13 @@ class Settings:
     )
     tts_korean_voice: str = os.getenv("AI_INTERPRETER_TTS_KOREAN_VOICE", "Sohee")
     tts_english_voice: str = os.getenv("AI_INTERPRETER_TTS_ENGLISH_VOICE", "Ryan")
+    # FasterQwen's CUDA streaming generator can wedge before yielding its first
+    # chunk and hold the global generation lock indefinitely.  Keep the proven
+    # whole-utterance CUDA path as the production default; streaming remains an
+    # explicit opt-in for isolated compatibility testing.
+    tts_experimental_streaming: bool = os.getenv(
+        "AI_INTERPRETER_TTS_EXPERIMENTAL_STREAMING", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

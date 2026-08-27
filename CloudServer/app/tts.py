@@ -38,7 +38,7 @@ class CUDANeuralTTS:
                     dtype=torch.bfloat16,
                     attn_implementation="sdpa",
                 )
-                self.streaming_available = True
+                self.streaming_available = self.settings.tts_experimental_streaming
             else:
                 kwargs = {
                     "device_map": "cuda:0",

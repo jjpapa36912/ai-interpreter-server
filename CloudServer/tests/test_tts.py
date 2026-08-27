@@ -49,5 +49,10 @@ class CUDANeuralTTSTests(unittest.TestCase):
         self.assertFalse(kwargs["non_streaming_mode"])
         self.assertEqual(kwargs["chunk_size"], 4)
 
+    def test_accelerated_streaming_is_disabled_by_default(self):
+        settings = Settings()
+
+        self.assertFalse(settings.tts_experimental_streaming)
+
 if __name__ == "__main__":
     unittest.main()
