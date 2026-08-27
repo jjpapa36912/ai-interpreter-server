@@ -19,7 +19,9 @@ class CUDANeuralTTS:
         self.streaming_available = False
 
     def _use_accelerated_backend(self, backend_available: bool) -> bool:
-        return backend_available and self.settings.tts_experimental_streaming
+        # FasterQwen also accelerates the proven whole-utterance API. Keep its
+        # experimental streaming generator independently opt-in below.
+        return backend_available
 
     def load(self) -> None:
         if self.loaded:
@@ -34,14 +36,10 @@ class CUDANeuralTTS:
                 FasterQwen3TTS = None
             from qwen_tts import Qwen3TTSModel
 
-            # FasterQwen is useful only for the explicitly enabled streaming
-            # experiment.  Selecting it merely because the package is
-            # installed also routes the production whole-utterance path
-            # through the experimental generator.  A cancelled short starter
-            # can then leave its CUDA generation wedged and every later HTTP
-            # request is reset by the proxy.  Keep production on Qwen's stable
-            # reference implementation; opt in to FasterQwen and its streaming
-            # generator together.
+            # Use FasterQwen's accelerated whole-utterance implementation in
+            # production. Its experimental streaming generator remains a
+            # separate explicit opt-in; the app now lets an accepted request
+            # finish instead of disconnecting mid-generation.
             if self._use_accelerated_backend(FasterQwen3TTS is not None):
                 self.model = FasterQwen3TTS.from_pretrained(
                     self.settings.tts_model,
@@ -49,7 +47,7 @@ class CUDANeuralTTS:
                     dtype=torch.bfloat16,
                     attn_implementation="sdpa",
                 )
-                self.streaming_available = True
+                self.streaming_available = self.settings.tts_experimental_streaming
             else:
                 kwargs = {
                     "device_map": "cuda:0",

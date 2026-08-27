@@ -53,7 +53,7 @@ class CUDANeuralTTSTests(unittest.TestCase):
         settings = Settings()
 
         self.assertFalse(settings.tts_experimental_streaming)
-        self.assertFalse(CUDANeuralTTS(settings)._use_accelerated_backend(True))
+        self.assertTrue(CUDANeuralTTS(settings)._use_accelerated_backend(True))
 
 if __name__ == "__main__":
     unittest.main()
