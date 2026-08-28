@@ -73,7 +73,10 @@ class CUDANeuralTTS:
         waveform = np.nan_to_num(waveform, nan=0.0, posinf=1.0, neginf=-1.0)
         return (np.clip(waveform, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
-    def synthesize_stream(self, text: str, language: str, voice_id: str | None = None):
+    def synthesize_stream(
+        self, text: str, language: str, voice_id: str | None = None,
+        speed: float = 1.0,
+    ):
         """Yield playable PCM while CUDA generation is still in progress."""
         if language not in {"en", "ko"}:
             raise ValueError("TTS language must be en or ko")
@@ -86,12 +89,20 @@ class CUDANeuralTTS:
             else self.settings.tts_english_voice
         )
         model_language = "Korean" if language == "ko" else "English"
+        pace_instruction = (
+            "평소보다 약 20퍼센트 빠르게 말하되 단어를 삼키거나 음절을 늘이지 마세요. "
+            if speed >= 1.15 and language == "ko" else
+            "Speak about twenty percent faster than usual without swallowing words or stretching syllables. "
+            if speed >= 1.15 else ""
+        )
         instruct = (
-            "실제 전문 통역사가 바로 옆에서 말하듯 자연스럽고 또렷하게 말하세요. "
+            pace_instruction
+            + "실제 전문 통역사가 바로 옆에서 말하듯 자연스럽고 또렷하게 말하세요. "
             "입력된 문장만 정확히 읽고, 어·음·에 같은 군더더기 소리나 설명을 절대 추가하지 마세요. "
             "문장 중간을 끊지 말고 의미 단위가 자연스럽게 이어지게 발음하세요."
             if language == "ko" else
-            "Speak like a natural professional interpreter in a clear conversational voice. "
+            pace_instruction
+            + "Speak like a natural professional interpreter in a clear conversational voice. "
             "Say only the supplied text exactly; never add fillers, commentary, or extra sounds. "
             "Keep each thought connected and do not stop in the middle of a phrase."
         )
@@ -123,8 +134,11 @@ class CUDANeuralTTS:
             if pcm:
                 yield pcm, int(sample_rate)
 
-    def synthesize(self, text: str, language: str, voice_id: str | None = None) -> tuple[bytes, int]:
-        chunks = list(self.synthesize_stream(text, language, voice_id))
+    def synthesize(
+        self, text: str, language: str, voice_id: str | None = None,
+        speed: float = 1.0,
+    ) -> tuple[bytes, int]:
+        chunks = list(self.synthesize_stream(text, language, voice_id, speed))
         if not chunks:
             raise RuntimeError("TTS returned no audio")
         return b"".join(chunk for chunk, _ in chunks), chunks[0][1]

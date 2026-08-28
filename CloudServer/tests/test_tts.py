@@ -32,6 +32,20 @@ class CUDANeuralTTSTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "en or ko"):
             engine.synthesize("bonjour", "fr")
 
+    def test_requested_fast_delivery_is_generated_by_the_voice_model(self):
+        engine = CUDANeuralTTS(Settings())
+        engine.model = Mock()
+        engine.model.generate_custom_voice.return_value = (
+            [np.asarray([0.0], dtype=np.float32)], 24_000,
+        )
+        engine.loaded = True
+
+        engine.synthesize("자연스럽게 따라갑니다.", "ko", speed=1.22)
+
+        instruct = engine.model.generate_custom_voice.call_args.kwargs["instruct"]
+        self.assertIn("20퍼센트 빠르게", instruct)
+        self.assertIn("음절을 늘이지 마세요", instruct)
+
     def test_accelerated_backend_yields_true_streaming_chunks(self):
         engine = CUDANeuralTTS(Settings())
         engine.model = Mock()

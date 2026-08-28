@@ -45,6 +45,7 @@ class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
     language: str
     voice_id: str | None = None
+    speed: float = Field(default=1.0, ge=0.85, le=1.30)
 
 
 def next_tts_chunk(iterator):
@@ -140,7 +141,7 @@ def synthesize_speech(request: TTSRequest) -> StreamingResponse:
     def chunks():
         yield from (
             pcm for pcm, _sample_rate in neural_tts().synthesize_stream(
-                request.text, request.language, request.voice_id
+                request.text, request.language, request.voice_id, request.speed
             )
         )
 
@@ -176,7 +177,7 @@ async def stream_speech(websocket: WebSocket) -> None:
             await websocket.send_json({"type": "tts_start", "sample_rate": 24_000})
             try:
                 iterator = neural_tts().synthesize_stream(
-                    request.text, request.language, request.voice_id
+                    request.text, request.language, request.voice_id, request.speed
                 )
                 while True:
                     generated = await asyncio.to_thread(next_tts_chunk, iterator)
