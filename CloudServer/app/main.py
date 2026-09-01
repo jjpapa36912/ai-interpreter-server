@@ -8,7 +8,7 @@ import threading
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .settings import settings
@@ -71,13 +71,14 @@ def neural_tts() -> CUDANeuralTTS:
 
 
 def _preload_models() -> None:
-    """Load ASR first, then translation, without blocking the health endpoint."""
+    """Load only the models required by this deployment."""
     global _preload_complete, _preload_error
     try:
-        speech_recognizer().load()
-        speech_recognizer().warmup()
-        translator().load()
-        translator().warmup()
+        if settings.service_mode != "tts":
+            speech_recognizer().load()
+            speech_recognizer().warmup()
+            translator().load()
+            translator().warmup()
         neural_tts().load()
         neural_tts().warmup()
         _preload_complete = True
@@ -125,11 +126,12 @@ def ready() -> dict[str, object]:
         ),
         "cuda": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "service_mode": settings.service_mode,
         "translation_model": settings.translation_model,
         "translation_adapter": settings.translation_adapter or None,
-        "translation_loaded": translator().loaded,
+        "translation_loaded": False if settings.service_mode == "tts" else translator().loaded,
         "asr_model": settings.asr_model,
-        "asr_loaded": speech_recognizer().loaded,
+        "asr_loaded": False if settings.service_mode == "tts" else speech_recognizer().loaded,
         "tts_model": settings.tts_model,
         "tts_loaded": neural_tts().loaded,
         "preload_error": _preload_error,
@@ -137,10 +139,29 @@ def ready() -> dict[str, object]:
 
 
 @app.post("/v1/tts/stream", dependencies=[Depends(authorize)])
-def synthesize_speech(request: TTSRequest) -> StreamingResponse:
+def synthesize_speech(request: TTSRequest) -> Response:
+    engine = neural_tts()
+    if not engine.streaming_available:
+        # The production backend already renders the complete waveform before
+        # its generator yields. Wrapping that one PCM blob in
+        # StreamingResponse made the G-Cube gateway pace a small audio body
+        # over several seconds. The app then consumed 200 ms packets faster
+        # than the proxy supplied them and produced audible mid-sentence
+        # under-runs. A fixed-length binary response preserves the exact same
+        # model output and first-byte model latency, but lets URLSession receive
+        # and queue the complete utterance immediately.
+        pcm, sample_rate = engine.synthesize(
+            request.text, request.language, request.voice_id, request.speed
+        )
+        return Response(
+            content=pcm,
+            media_type="audio/L16;rate=24000;channels=1",
+            headers={"X-Audio-Sample-Rate": str(sample_rate)},
+        )
+
     def chunks():
         yield from (
-            pcm for pcm, _sample_rate in neural_tts().synthesize_stream(
+            pcm for pcm, _sample_rate in engine.synthesize_stream(
                 request.text, request.language, request.voice_id, request.speed
             )
         )
