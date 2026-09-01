@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import threading
 
 import numpy as np
@@ -46,6 +47,7 @@ class CUDANeuralTTS:
                     device="cuda",
                     dtype=torch.bfloat16,
                     attn_implementation="sdpa",
+                    max_seq_len=self.settings.tts_max_sequence_length,
                 )
                 self.streaming_available = self.settings.tts_experimental_streaming
             else:
@@ -107,32 +109,53 @@ class CUDANeuralTTS:
             "Keep each thought connected and do not stop in the middle of a phrase."
         )
         with self._generation_lock:
-            if self.streaming_available:
-                for waveform, sample_rate, _timing in self.model.generate_custom_voice_streaming(
+            try:
+                if self.streaming_available:
+                    for waveform, sample_rate, _timing in self.model.generate_custom_voice_streaming(
+                        text=clean,
+                        language=model_language,
+                        speaker=speaker,
+                        instruct=instruct,
+                        chunk_size=4,
+                        max_new_tokens=self.settings.tts_max_new_tokens,
+                        # The old value waited for the complete utterance before
+                        # yielding anything, despite the streaming HTTP endpoint.
+                        # Emit codec chunks as they are generated so first audio is
+                        # not tied to total sentence duration.
+                        non_streaming_mode=False,
+                    ):
+                        pcm = self._pcm(waveform)
+                        if pcm:
+                            yield pcm, int(sample_rate)
+                    return
+                wavs, sample_rate = self.model.generate_custom_voice(
                     text=clean,
                     language=model_language,
                     speaker=speaker,
                     instruct=instruct,
-                    chunk_size=4,
-                    # The old value waited for the complete utterance before
-                    # yielding anything, despite the streaming HTTP endpoint.
-                    # Emit codec chunks as they are generated so first audio is
-                    # not tied to total sentence duration.
-                    non_streaming_mode=False,
-                ):
-                    pcm = self._pcm(waveform)
-                    if pcm:
-                        yield pcm, int(sample_rate)
-                return
-            wavs, sample_rate = self.model.generate_custom_voice(
-                text=clean,
-                language=model_language,
-                speaker=speaker,
-                instruct=instruct,
-            )
-            pcm = self._pcm(wavs[0])
-            if pcm:
-                yield pcm, int(sample_rate)
+                    max_new_tokens=self.settings.tts_max_new_tokens,
+                )
+                pcm = self._pcm(wavs[0])
+                if pcm:
+                    yield pcm, int(sample_rate)
+            finally:
+                # FasterQwen returns CPU audio but leaves short-lived CUDA
+                # prefill/decoder tensors to Python's nondeterministic GC.  In
+                # an always-on worker those allocations accumulated until the
+                # third/fourth request killed uvicorn, while the G-Cube sidecar
+                # stayed healthy.  Release only transient cached blocks after
+                # each serialized generation; model weights and captured
+                # graphs remain referenced and warm.
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                except (ImportError, RuntimeError):
+                    # Cleanup must never turn successfully generated speech
+                    # into an HTTP 500 response.
+                    pass
 
     def synthesize(
         self, text: str, language: str, voice_id: str | None = None,
