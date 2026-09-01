@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${AI_INTERPRETER_SERVICE_MODE:-full}" != "tts" ]]; then
 python - <<'PY'
 from pathlib import Path
 import os
@@ -10,6 +11,7 @@ required = adapter / "adapter_model.safetensors"
 if not required.is_file() or required.stat().st_size < 100_000_000:
     raise SystemExit(f"invalid translation adapter: {required}")
 PY
+fi
 
 # ctranslate2 currently links against CUDA 12 cublas while the NGC runtime may
 # expose CUDA 13. The wheel below supplies the ABI it needs without modifying
