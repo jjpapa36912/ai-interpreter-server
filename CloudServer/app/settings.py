@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Settings:
+    service_mode: str = os.getenv(
+        "AI_INTERPRETER_SERVICE_MODE", "full"
+    ).strip().lower()
     translation_model: str = os.getenv(
         "AI_INTERPRETER_TRANSLATION_MODEL", "Qwen/Qwen3-8B"
     )
