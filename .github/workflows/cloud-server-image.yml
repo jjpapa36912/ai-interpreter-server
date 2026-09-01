@@ -62,6 +62,7 @@ jobs:
           mkdir -p "${overlay}/srv/ai-interpreter/scripts"
           cp CloudServer/app/main.py "${overlay}/srv/ai-interpreter/app/main.py"
           cp CloudServer/app/settings.py "${overlay}/srv/ai-interpreter/app/settings.py"
+          cp CloudServer/app/tts.py "${overlay}/srv/ai-interpreter/app/tts.py"
           cp CloudServer/scripts/start-server.sh "${overlay}/srv/ai-interpreter/scripts/start-server.sh"
           chmod 755 "${overlay}/srv/ai-interpreter/scripts/start-server.sh"
           tar -C "${overlay}" -czf "${RUNNER_TEMP}/tts-overlay.tar.gz" .
