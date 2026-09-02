@@ -89,7 +89,13 @@ class TTSJobStore:
     def __init__(
         self,
         sample_rate: int = 24_000,
-        chunk_milliseconds: int = 200,
+        # The app repacketizes every response into 200 ms playback buffers.
+        # Keeping the network mailbox at 200 ms as well forced one HTTPS GET
+        # per tiny playback buffer (25 round trips for five seconds of audio),
+        # which made the public gateway return 503 and stranded completed GPU
+        # work. One-second transport blocks preserve the same playback cadence
+        # while cutting proxy traffic by five times.
+        chunk_milliseconds: int = 1_000,
         maximum_jobs: int = 32,
         retention_seconds: float = 120.0,
     ) -> None:
