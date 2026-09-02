@@ -26,6 +26,7 @@ class CUDANeuralTTSTests(unittest.TestCase):
         self.assertEqual(kwargs["speaker"], "Sohee")
         self.assertIn("군더더기 소리", kwargs["instruct"])
         self.assertIn("입력된 문장만 정확히", kwargs["instruct"])
+        self.assertEqual(kwargs["max_new_tokens"], 384)
 
     def test_rejects_unsupported_language_before_loading(self):
         engine = CUDANeuralTTS(Settings())
@@ -68,6 +69,23 @@ class CUDANeuralTTSTests(unittest.TestCase):
 
         self.assertFalse(settings.tts_experimental_streaming)
         self.assertTrue(CUDANeuralTTS(settings)._use_accelerated_backend(True))
+
+    def test_server_uses_bounded_cuda_cache_and_generation(self):
+        settings = Settings()
+
+        self.assertEqual(settings.tts_max_sequence_length, 768)
+        self.assertEqual(settings.tts_max_new_tokens, 384)
+
+    def test_cuda_cache_cleanup_is_pressure_driven_not_per_phrase(self):
+        self.assertFalse(CUDANeuralTTS.should_release_cuda_cache(
+            free_bytes=8_000, total_bytes=10_000, generation_count=1
+        ))
+        self.assertTrue(CUDANeuralTTS.should_release_cuda_cache(
+            free_bytes=1_000, total_bytes=10_000, generation_count=2
+        ))
+        self.assertTrue(CUDANeuralTTS.should_release_cuda_cache(
+            free_bytes=8_000, total_bytes=10_000, generation_count=64
+        ))
 
 if __name__ == "__main__":
     unittest.main()

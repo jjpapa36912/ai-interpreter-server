@@ -18,6 +18,7 @@ from .asr import (
     StreamingASRSession,
 )
 from .tts import CUDANeuralTTS
+from .tts_jobs import TTSJobStore
 
 
 app = FastAPI(title="AI Interpreter CUDA Server", version="0.2.0")
@@ -48,6 +49,12 @@ class TTSRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.85, le=1.30)
 
 
+class TTSJobResponse(BaseModel):
+    job_id: str
+    sample_rate: int
+    transport: str = "pcm-pull-v1"
+
+
 def next_tts_chunk(iterator):
     try:
         return next(iterator)
@@ -68,6 +75,9 @@ def speech_recognizer() -> CUDASpeechRecognizer:
 @lru_cache(maxsize=1)
 def neural_tts() -> CUDANeuralTTS:
     return CUDANeuralTTS(settings)
+
+
+tts_job_store = TTSJobStore()
 
 
 def _preload_models() -> None:
@@ -134,6 +144,8 @@ def ready() -> dict[str, object]:
         "asr_loaded": False if settings.service_mode == "tts" else speech_recognizer().loaded,
         "tts_model": settings.tts_model,
         "tts_loaded": neural_tts().loaded,
+        "tts_transport": "pcm-pull-v1",
+        "tts_incremental_pcm": neural_tts().streaming_available,
         "preload_error": _preload_error,
     }
 
@@ -170,6 +182,78 @@ def synthesize_speech(request: TTSRequest) -> Response:
         chunks(),
         media_type="audio/L16;rate=24000;channels=1",
         headers={"X-Audio-Sample-Rate": "24000"},
+    )
+
+
+@app.post(
+    "/v1/tts/jobs", response_model=TTSJobResponse,
+    dependencies=[Depends(authorize)],
+)
+def create_tts_job(
+    request: TTSRequest,
+    x_tts_request_id: str | None = Header(default=None),
+) -> TTSJobResponse:
+    """Start neural generation without holding one buffered proxy response."""
+    request_id = (x_tts_request_id or "").strip() or None
+    if request_id is not None and len(request_id) > 128:
+        raise HTTPException(status_code=400, detail="TTS request id is too long")
+    job = tts_job_store.create(request_id=request_id)
+    if job is None:
+        raise HTTPException(status_code=429, detail="TTS job capacity reached")
+
+    def generate() -> None:
+        try:
+            for pcm, sample_rate in neural_tts().synthesize_stream(
+                request.text, request.language, request.voice_id, request.speed
+            ):
+                if sample_rate != job.sample_rate:
+                    raise RuntimeError(
+                        f"unexpected TTS sample rate {sample_rate}; expected {job.sample_rate}"
+                    )
+                job.append(pcm, tts_job_store.maximum_chunk_bytes)
+            job.finish()
+        except Exception as error:
+            job.fail(f"{type(error).__name__}: {error}")
+
+    if job.claim_generation():
+        threading.Thread(
+            target=generate, name=f"tts-job-{job.job_id[:8]}", daemon=True
+        ).start()
+    return TTSJobResponse(job_id=job.job_id, sample_rate=job.sample_rate)
+
+
+@app.get(
+    "/v1/tts/jobs/{job_id}/chunks/{sequence}",
+    dependencies=[Depends(authorize)],
+)
+def get_tts_job_chunk(
+    job_id: str, sequence: int, wait_ms: int = 800
+) -> Response:
+    if sequence < 0:
+        raise HTTPException(status_code=400, detail="sequence must be non-negative")
+    job = tts_job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown or expired TTS job")
+    snapshot = job.wait_for(sequence, min(max(wait_ms, 0), 1_500) / 1_000)
+    if snapshot.error:
+        raise HTTPException(status_code=500, detail=snapshot.error)
+    headers = {
+        "X-TTS-Sequence": str(sequence),
+        "X-TTS-Done": "1" if snapshot.final_chunk
+            or (snapshot.done and snapshot.chunk is None) else "0",
+        "X-Audio-Sample-Rate": str(job.sample_rate),
+        "Cache-Control": "no-store",
+    }
+    if job.first_chunk_at is not None:
+        headers["X-TTS-First-PCM-Ms"] = str(round(
+            (job.first_chunk_at - job.created_at) * 1_000, 1
+        ))
+    if snapshot.chunk is None:
+        return Response(status_code=204, headers=headers)
+    return Response(
+        content=snapshot.chunk,
+        media_type=f"audio/L16;rate={job.sample_rate};channels=1",
+        headers=headers,
     )
 
 

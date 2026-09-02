@@ -107,8 +107,8 @@ struct ConfirmedTranslationMicrobatchPolicyTests {
 
 @Suite("Remote TTS circuit breaker policy")
 struct RemoteTTSCircuitBreakerPolicyTests {
-    @Test func transientFirstAudioTimeoutDoesNotChangeTheSessionVoice() {
-        #expect(!RemoteTTSCircuitBreakerPolicy.shouldOpen(
+    @Test func exhaustedRemoteOutageLocksTheSessionToLocalVoice() {
+        #expect(RemoteTTSCircuitBreakerPolicy.shouldOpen(
             firstAudioWasEmitted: false, failureWasFirstAudioTimeout: true
         ))
         #expect(!RemoteTTSCircuitBreakerPolicy.shouldOpen(
@@ -122,16 +122,42 @@ struct RemoteTTSCircuitBreakerPolicyTests {
             failureWasFirstAudioTimeout: false,
             failureWasPermanentBeforeAudio: true
         ))
+        #expect(RemoteTTSCircuitBreakerPolicy.shouldOpen(
+            firstAudioWasEmitted: false,
+            failureWasFirstAudioTimeout: false,
+            failureWasRemoteOutageBeforeAudio: true
+        ))
         #expect(!RemoteTTSCircuitBreakerPolicy.shouldOpen(
             firstAudioWasEmitted: true,
             failureWasFirstAudioTimeout: false,
             failureWasPermanentBeforeAudio: true
+        ))
+        #expect(!RemoteTTSCircuitBreakerPolicy.shouldOpen(
+            firstAudioWasEmitted: false,
+            failureWasFirstAudioTimeout: true,
+            failureWasRemoteOutageBeforeAudio: true,
+            sessionHasDeliveredRemoteSpeech: true
         ))
     }
 
     @Test func deadlineAllowsNormalLongClauseGpuLatency() {
         #expect(RemoteTTSCircuitBreakerPolicy.firstAudioDeadlineSeconds >= 3.0)
         #expect(RemoteTTSCircuitBreakerPolicy.firstAudioDeadlineSeconds <= 3.5)
+    }
+}
+
+@Suite("Remote TTS startup availability policy")
+struct RemoteTTSAvailabilityPolicyTests {
+    @Test func onlySuccessfulReadyResponsesSelectGPUVoice() {
+        #expect(RemoteTTSAvailabilityPolicy.isReady(statusCode: 200))
+        #expect(RemoteTTSAvailabilityPolicy.isReady(statusCode: 204))
+        #expect(!RemoteTTSAvailabilityPolicy.isReady(statusCode: 401))
+        #expect(!RemoteTTSAvailabilityPolicy.isReady(statusCode: 503))
+    }
+
+    @Test func offlineProbeIsStrictlyBounded() {
+        #expect(RemoteTTSAvailabilityPolicy.attemptCount == 2)
+        #expect(RemoteTTSAvailabilityPolicy.requestTimeoutSeconds <= 1.0)
     }
 }
 

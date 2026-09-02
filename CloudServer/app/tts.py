@@ -17,6 +17,7 @@ class CUDANeuralTTS:
         self.loaded = False
         self._load_lock = threading.Lock()
         self._generation_lock = threading.Lock()
+        self._generation_count = 0
         self.streaming_available = False
 
     def _use_accelerated_backend(self, backend_available: bool) -> bool:
@@ -74,6 +75,36 @@ class CUDANeuralTTS:
         waveform = np.asarray(waveform, dtype=np.float32).reshape(-1)
         waveform = np.nan_to_num(waveform, nan=0.0, posinf=1.0, neginf=-1.0)
         return (np.clip(waveform, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+    @staticmethod
+    def should_release_cuda_cache(
+        free_bytes: int, total_bytes: int, generation_count: int
+    ) -> bool:
+        """Release cached blocks only under pressure or as rare maintenance."""
+        if total_bytes <= 0:
+            return False
+        free_ratio = free_bytes / total_bytes
+        return free_ratio < 0.12 or generation_count % 64 == 0
+
+    def _release_transient_cuda_memory_if_needed(self) -> None:
+        self._generation_count += 1
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            if not self.should_release_cuda_cache(
+                free_bytes, total_bytes, self._generation_count
+            ):
+                return
+            # A rare pressure-triggered collection protects an always-on
+            # worker without adding a global CUDA barrier to every phrase.
+            gc.collect()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        except (ImportError, RuntimeError):
+            # Cleanup must never turn successfully generated speech into 500.
+            pass
 
     def synthesize_stream(
         self, text: str, language: str, voice_id: str | None = None,
@@ -139,23 +170,12 @@ class CUDANeuralTTS:
                 if pcm:
                     yield pcm, int(sample_rate)
             finally:
-                # FasterQwen returns CPU audio but leaves short-lived CUDA
-                # prefill/decoder tensors to Python's nondeterministic GC.  In
-                # an always-on worker those allocations accumulated until the
-                # third/fourth request killed uvicorn, while the G-Cube sidecar
-                # stayed healthy.  Release only transient cached blocks after
-                # each serialized generation; model weights and captured
-                # graphs remain referenced and warm.
-                gc.collect()
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                        torch.cuda.empty_cache()
-                except (ImportError, RuntimeError):
-                    # Cleanup must never turn successfully generated speech
-                    # into an HTTP 500 response.
-                    pass
+                # Calling gc.collect + synchronize + empty_cache after every
+                # short clause destroys CUDA allocator reuse and inserts a
+                # serial barrier between phrases. Keep the warm cache unless
+                # free VRAM is genuinely low; perform rare maintenance as a
+                # guard against long-session fragmentation.
+                self._release_transient_cuda_memory_if_needed()
 
     def synthesize(
         self, text: str, language: str, voice_id: str | None = None,

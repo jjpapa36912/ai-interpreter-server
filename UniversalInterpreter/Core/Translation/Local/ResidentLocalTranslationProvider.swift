@@ -134,13 +134,20 @@ struct RemoteTTSCircuitBreakerPolicy: Sendable {
     static func shouldOpen(
         firstAudioWasEmitted: Bool,
         failureWasFirstAudioTimeout: Bool,
-        failureWasPermanentBeforeAudio: Bool = false
+        failureWasPermanentBeforeAudio: Bool = false,
+        failureWasRemoteOutageBeforeAudio: Bool = false,
+        sessionHasDeliveredRemoteSpeech: Bool = false
     ) -> Bool {
-        // A single slow clause must not permanently change the product voice
-        // from GPU to the platform synthesizer. Only an unsupported/permanently
-        // missing route opens the session-wide circuit. Transient timeouts and
-        // 5xx failures remain retryable on the configured GPU voice.
-        !firstAudioWasEmitted && failureWasPermanentBeforeAudio
+        // CosyVoice already performs its bounded transport retries before this
+        // policy sees an outage. If no PCM was emitted after those retries,
+        // lock the remainder of this session to local speech. Never switch
+        // after audible GPU PCM: that would splice two speakers into one
+        // utterance.
+        !sessionHasDeliveredRemoteSpeech && !firstAudioWasEmitted && (
+            failureWasFirstAudioTimeout
+                || failureWasPermanentBeforeAudio
+                || failureWasRemoteOutageBeforeAudio
+        )
     }
 }
 
@@ -819,13 +826,14 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
     private var speechSynthesisInFlight = false
     private var activeSpeechOutputGate: SpeechOutputGate?
     private var neuralVoicePreparationTask: Task<Void, Never>?
-    private var remoteTTSPrimeTask: Task<Void, Never>?
-    /// Once the remote endpoint misses the first-audio deadline, do not feed
-    /// more sentences into its serialized generator during this session.
-    /// Confirmed translations remain ordered and use the immediate local
-    /// voice path instead of accumulating behind an unhealthy GPU request.
+    private var remoteTTSPrimeTask: Task<Bool, Never>?
+    /// The route is selected once at session start. A first-request outage may
+    /// still lock an otherwise silent session to local speech. Once GPU PCM has
+    /// been audible, however, later failures remain visible and never change
+    /// speakers halfway through a conversation.
     private var remoteTTSCircuitOpen = false
     private var neuralVoiceReady = false
+    private var sessionHasDeliveredRemoteSpeech = false
     private var progressiveRecognizer: Any?
     private var sourceLanguage: Language?
     private var targetLanguage: Language?
@@ -1070,6 +1078,7 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
         confirmedTranslationDisplay = ""
         lastSpokenText = ""
         remoteTTSCircuitOpen = false
+        sessionHasDeliveredRemoteSpeech = false
         pendingSpeechFragment = nil
         backloggedSpeechRequests.removeAll(keepingCapacity: true)
         pendingSpeechFlushTask?.cancel()
@@ -1094,13 +1103,12 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
             audioMilliseconds: 0, sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage
         )
-        // The server performs model load and warm-up once during deployment.
-        // A discarded synthesis at every app session competed for the same
-        // serial GPU lock as the first real utterance and could add seconds to
-        // first speech. Only establish DNS/TLS/keep-alive here.
+        // Probe readiness in parallel with local model preparation. This
+        // selects one stable speech route for the entire session without
+        // adding the probe's normal network latency to capture startup.
         if let remoteTTS {
             remoteTTSPrimeTask = Task(priority: .userInitiated) {
-                await remoteTTS.prewarmConnection()
+                await remoteTTS.isReadyForSession()
             }
         }
         // Pay the system Translation session's one-time setup cost before any
@@ -1124,6 +1132,19 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
             // first confirmed phrase from carrying a multi-second cold start.
             try await worker.prepareSimultaneousBoundary(sourceLanguage: sourceLanguage)
             try await worker.prepareTranslation()
+        }
+        if remoteTTS != nil {
+            let remoteIsReady = await remoteTTSPrimeTask?.value ?? false
+            remoteTTSCircuitOpen = !remoteIsReady
+            neuralVoiceReady = remoteIsReady
+            await SimultaneousDebugLogger.shared.record(
+                sessionID: simultaneousDebugSessionID,
+                event: "tts_route_selected",
+                audioMilliseconds: 0,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                status: remoteIsReady ? "gpu_session" : "local_session"
+            )
         }
         // The parallel synthesis prime above includes the connection warm-up.
         // Live local speech uses deterministic AVSpeech synthesis. Do not load
@@ -4157,6 +4178,7 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
                 _ = firstAudibleChunkGate.fire()
             }
             if firstAudibleChunkGate.hasFired {
+                if remoteTTS != nil { sessionHasDeliveredRemoteSpeech = true }
                 // Make the state transition deterministic even if the callback
                 // task has not yet resumed on this actor.
                 confirmAudibleSpeech(request)
@@ -4184,20 +4206,34 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
                 failureWasFirstAudioTimeout = false
             }
             let failureWasPermanentBeforeAudio: Bool
+            let failureWasRemoteOutageBeforeAudio: Bool
             if case let CosyVoiceStreamingError.invalidResponse(status) = error {
                 // A missing/unsupported route will not recover on the next
                 // sentence. Open the circuit once and immediately retain
                 // audible interpretation through the local renderer.
                 failureWasPermanentBeforeAudio = [400, 404, 405, 410, 415, 422]
                     .contains(status)
+                failureWasRemoteOutageBeforeAudio = [502, 503, 504].contains(status)
             } else {
                 failureWasPermanentBeforeAudio = false
+                if let urlError = error as? URLError {
+                    failureWasRemoteOutageBeforeAudio = [
+                        .timedOut, .cannotFindHost, .cannotConnectToHost,
+                        .dnsLookupFailed, .networkConnectionLost,
+                        .notConnectedToInternet, .secureConnectionFailed
+                    ].contains(urlError.code)
+                } else {
+                    failureWasRemoteOutageBeforeAudio =
+                        error is SpeechSynthesisWatchdogTimeout
+                }
             }
             if attemptedRemoteTTS,
                RemoteTTSCircuitBreakerPolicy.shouldOpen(
                    firstAudioWasEmitted: firstChunkGate.hasFired,
                    failureWasFirstAudioTimeout: failureWasFirstAudioTimeout,
-                   failureWasPermanentBeforeAudio: failureWasPermanentBeforeAudio
+                   failureWasPermanentBeforeAudio: failureWasPermanentBeforeAudio,
+                   failureWasRemoteOutageBeforeAudio: failureWasRemoteOutageBeforeAudio,
+                   sessionHasDeliveredRemoteSpeech: sessionHasDeliveredRemoteSpeech
                ) {
                 remoteTTSCircuitOpen = true
                 neuralVoiceReady = false
@@ -4209,7 +4245,9 @@ actor ResidentLocalTranslationProvider: TranslationProvider {
                     translation: speechText,
                     status: failureWasPermanentBeforeAudio
                         ? "remote_route_unavailable"
-                        : "first_audio_deadline_exceeded"
+                        : failureWasFirstAudioTimeout
+                            ? "first_audio_deadline_exceeded"
+                            : "remote_service_unavailable"
                 )
                 do {
                     try await AppleLocalTranslationProvider.speakText(
