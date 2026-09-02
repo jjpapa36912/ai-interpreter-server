@@ -37,22 +37,19 @@ jobs:
           tags: |
             type=raw,value=prototype
             type=sha,prefix=sha-
-      - uses: docker/build-push-action@v6
-        id: image-build
-        continue-on-error: true
-        with:
-          context: .
-          file: CloudServer/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/ai-interpreter-server:prototype
-          cache-to: type=inline
       - uses: imjasonh/setup-crane@v0.4
-        if: steps.image-build.outcome == 'failure'
+      - name: Check for an existing resident-model image
+        id: resident-image
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/ai-interpreter-server
+        run: |
+          if crane digest "${IMAGE}:prototype" --platform linux/amd64 >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Apply source overlay without downloading model layers
-        if: steps.image-build.outcome == 'failure'
+        if: steps.resident-image.outputs.exists == 'true'
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/ai-interpreter-server
         run: |
@@ -69,9 +66,23 @@ jobs:
           tar -C "${overlay}" -czf "${RUNNER_TEMP}/tts-overlay.tar.gz" .
 
           overlay_tag="overlay-${GITHUB_SHA}"
+          sha_tag="sha-${GITHUB_SHA::7}"
           crane mutate "${IMAGE}:prototype" \
             --platform linux/amd64 \
             --append "${RUNNER_TEMP}/tts-overlay.tar.gz" \
             --env AI_INTERPRETER_SERVICE_MODE=tts \
             --tag "${IMAGE}:${overlay_tag}"
           crane tag "${IMAGE}:${overlay_tag}" prototype
+          crane tag "${IMAGE}:${overlay_tag}" "${sha_tag}"
+      - uses: docker/build-push-action@v6
+        id: image-build
+        if: steps.resident-image.outputs.exists != 'true'
+        with:
+          context: .
+          file: CloudServer/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/ai-interpreter-server:prototype
+          cache-to: type=inline
